@@ -47,7 +47,7 @@ class CSVIngestor(JobIngestor):
                 )
                 jobs.append(job)
             except ValidationError as e:
-                rejected.append({"row_number": idx, "row": row, "error": str(e)})
+                rejected.append({"row_number": idx, "row": {"title": row.get("title", "Unknown"), "source_job_id": row.get("source_job_id", "Unknown")}, "error": str(e)})
         return jobs, rejected
 
 class URLIngestor(JobIngestor):
@@ -79,5 +79,5 @@ class URLIngestor(JobIngestor):
                 )
                 jobs.append(job)
             except ValidationError as e:
-                rejected.append({"row": item, "error": str(e)})
+                rejected.append({"row": {"title": item.get("title", "Unknown"), "source_job_id": item.get("source_job_id", "Unknown")}, "error": str(e)})
         return jobs, rejected
