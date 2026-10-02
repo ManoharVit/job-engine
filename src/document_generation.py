@@ -15,8 +15,26 @@ class DuplicateDraftError(Exception):
 class DocumentGenerator:
     """
     Generates documents based on job and profile.
-    
-    Dry-run duplicate detection is process-local unless persistence is enabled.
+
+    Transaction contract: Service-owned (Model 1).
+
+    In real mode (dry_run=False), each public method owns its database
+    transaction.  On success it calls session.commit(); on any failure it
+    calls session.rollback() and re-raises.  Because the rollback covers
+    the entire session, any uncommitted objects the caller added to the
+    same session before calling this method will also be discarded.
+    Callers who need to protect their own pending state must either commit
+    first or use a separate session.
+
+    In dry-run mode (dry_run=True), no database reads or writes are
+    performed.  Duplicate-draft detection is skipped because it requires
+    a database query; therefore dry-run duplicate detection is
+    process-local only.  An AuditLog object is constructed in memory and
+    returned but never added to the session.  The returned draft text is
+    identical to what real mode would produce.
+
+    PostgreSQL compatibility and Alembic migrations remain unverified.
+    All constraint enforcement has been tested with SQLite only.
     """
     def __init__(self, session, dry_run: bool = True):
         self.session = session
@@ -39,7 +57,13 @@ class DocumentGenerator:
         return audit_log
 
     def generate_fit_summary(self, job: JobModel, profile: CandidateProfile, verified_evidences: List[Evidence]) -> Tuple[Dict[str, List[str]], AuditLog]:
-        """Fit-summary generator showing matched, missing, uncertain, and negated requirements."""
+        """Fit-summary generator showing matched, missing, uncertain, and negated requirements.
+        
+        This method is explicitly dry-run only. It does not persist any state.
+        """
+        if not self.dry_run:
+            raise NotImplementedError("generate_fit_summary is currently dry-run only.")
+
         verified_skills = self._get_verified_skills(verified_evidences)
         job_reqs = set(s.lower() for s in (job.required_skills or []))
         job_prefs = set(s.lower() for s in (job.preferred_skills or []))
@@ -74,12 +98,19 @@ class DocumentGenerator:
         audit_log = self._log_audit(
             action="GENERATE_FIT_SUMMARY",
             entity_id=str(job.id) if job.id else getattr(job, "source_job_id", ""),
-            details=summary
+            details=summary,
+            commit=False
         )
         return summary, audit_log
 
     def generate_resume_keyword_suggestions(self, job: JobModel, verified_evidences: List[Evidence]) -> Tuple[List[str], AuditLog]:
-        """Resume-keyword suggestion generator."""
+        """Resume-keyword suggestion generator.
+        
+        This method is explicitly dry-run only. It does not persist any state.
+        """
+        if not self.dry_run:
+            raise NotImplementedError("generate_resume_keyword_suggestions is currently dry-run only.")
+
         verified_skills = self._get_verified_skills(verified_evidences)
         job_skills = set(s.lower() for s in (job.required_skills or []) + (job.preferred_skills or []))
         
@@ -88,27 +119,52 @@ class DocumentGenerator:
         audit_log = self._log_audit(
             action="GENERATE_RESUME_KEYWORDS",
             entity_id=str(job.id) if job.id else getattr(job, "source_job_id", ""),
-            details={"suggestions": suggestions}
+            details={"suggestions": suggestions},
+            commit=False
         )
         return suggestions, audit_log
 
     def generate_cover_letter_draft(self, job: JobModel, profile: CandidateProfile, verified_evidences: List[Evidence]) -> Tuple[str, AuditLog]:
-        """Tailored cover-letter draft generator. Marks unsupported claims as [VERIFY]."""
+        """Generate a tailored cover-letter draft.
+
+        Marks skills without verified evidence as [VERIFY: <skill> experience].
+
+        Service-owned transaction (Model 1):
+        - On success: commits Draft row + AuditLog row atomically.
+        - On failure: rolls back the entire session and raises.
+          This discards ALL uncommitted changes on the session, including
+          objects the caller may have added before this call.
+
+        Raises:
+            ValueError: job.id is None in real mode.
+            DuplicateDraftError: a draft already exists (early check or
+                IntegrityError from the unique constraint).
+            MissingEvidenceError: no Evidence record has verified=True.
+        """
         verified_skills = self._get_verified_skills(verified_evidences)
         job_id_str = str(job.id) if job.id else getattr(job, "source_job_id", "")
         
         if not self.dry_run:
             if not job.id:
+                self.session.rollback()
                 raise ValueError("Job must be saved to DB before generating drafts in real mode.")
             
-            existing_draft = self.session.query(Draft).filter_by(
-                job_id=job.id, document_type="cover_letter", version=1
-            ).first()
+            try:
+                existing_draft = self.session.query(Draft).filter_by(
+                    job_id=job.id, document_type="cover_letter", version=1
+                ).first()
+            except Exception:
+                self.session.rollback()
+                raise
+
             if existing_draft:
+                self.session.rollback()
                 raise DuplicateDraftError("Draft already generated for this job.")
         
         has_verified = any(e.verified for e in verified_evidences)
         if not has_verified:
+            if not self.dry_run:
+                self.session.rollback()
             raise MissingEvidenceError("No verified evidence provided for cover letter generation.")
             
         draft_parts = []
@@ -121,7 +177,7 @@ class DocumentGenerator:
             else:
                 draft_parts.append(f"[VERIFY: {skill} experience]")
                 
-        draft = "\\n\\n".join(draft_parts)
+        draft = "\n\n".join(draft_parts)
         
         content_hash = hashlib.sha256(draft.encode('utf-8')).hexdigest()
         audit_log = self._log_audit(
