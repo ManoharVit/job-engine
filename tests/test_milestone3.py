@@ -59,11 +59,11 @@ def test_invalid_state_transitions(session):
     
     # APPLIED can transition to WITHDRAWN
     state_machine.transition(job, JobState.APPLIED)
-    state_machine.transition(job, JobState.WITHDRAWN)
+    state_machine.transition(job, JobState.WITHDRAWN, reason="Testing withdrawal")
     
     # WITHDRAWN is terminal
     with pytest.raises(InvalidStateTransitionError):
-        state_machine.transition(job, JobState.REJECTED)
+        state_machine.transition(job, JobState.REJECTED, reason="Testing rejection")
         
 def test_approval_denial(session):
     job = JobModel(source="test", source_job_id="3", canonical_url="http://test.com", title="SE", company="Test")
@@ -72,7 +72,7 @@ def test_approval_denial(session):
     
     state_machine = ApprovalStateMachine(session)
     state_machine.transition(job, JobState.REVIEWED)
-    state_machine.transition(job, JobState.REJECTED)
+    state_machine.transition(job, JobState.REJECTED, reason="Testing rejection")
     assert job.application_status == JobState.REJECTED.value
     
 def test_unsupported_claims_marked_verify(session):

@@ -363,4 +363,4 @@ def test_csv_import_db_error(client, test_db, monkeypatch):
     response = client.post("/api/jobs/csv", content=csv_content, headers={"Content-Type": "text/csv"})
     assert response.status_code == 200
     assert response.json()["imported"] == 0
-    assert "DB Error" in response.json()["rejected"][0]["error"]
+    assert "Database error" in response.json()["rejected"][0]["error"]
