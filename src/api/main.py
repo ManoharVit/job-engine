@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Body, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
@@ -11,7 +12,12 @@ from src.ingestors import CSVIngestor
 from src.document_generation import DocumentGenerator, MissingEvidenceError, DuplicateDraftError
 from src.approval import ApprovalStateMachine, JobState, InvalidStateTransitionError
 
-app = FastAPI(title="Job Engine API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(title="Job Engine API", lifespan=lifespan)
 
 class ReviewRequest(BaseModel):
     profile: CandidateProfile
@@ -22,9 +28,6 @@ class StateTransitionRequest(BaseModel):
     reason: str = ""
     dry_run: bool = False
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
 
 @app.post("/api/jobs", response_model=JobRead)
 def import_manual_job(job: JobCreate, db: Session = Depends(get_db)):

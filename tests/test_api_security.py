@@ -73,7 +73,7 @@ def test_review_no_mutation(test_db):
     
     assert test_db.query(Draft).filter_by(job_id=job_id).count() == 0
     assert test_db.query(AuditLog).filter_by(entity_id=str(job_id)).count() == 0
-    job = test_db.query(JobModel).get(job_id)
+    job = test_db.get(JobModel, job_id)
     assert job.application_status == "NEW"
 
 def test_rejected_withdrawn_reason(test_db):
