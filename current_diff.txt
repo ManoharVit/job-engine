@@ -1,0 +1,569 @@
+diff --git a/.coverage b/.coverage
+index 2da4cf0..4aa1522 100644
+Binary files a/.coverage and b/.coverage differ
+diff --git a/src/__pycache__/approval.cpython-312.pyc b/src/__pycache__/approval.cpython-312.pyc
+index 7557c17..858077f 100644
+Binary files a/src/__pycache__/approval.cpython-312.pyc and b/src/__pycache__/approval.cpython-312.pyc differ
+diff --git a/src/__pycache__/document_generation.cpython-312.pyc b/src/__pycache__/document_generation.cpython-312.pyc
+index 74a4381..d23a846 100644
+Binary files a/src/__pycache__/document_generation.cpython-312.pyc and b/src/__pycache__/document_generation.cpython-312.pyc differ
+diff --git a/src/approval.py b/src/approval.py
+index d9e8959..48071d5 100644
+--- a/src/approval.py
++++ b/src/approval.py
+@@ -19,22 +19,35 @@ class InvalidStateTransitionError(Exception):
+ class ApprovalStateMachine:
+     VALID_TRANSITIONS = {
+         JobState.NEW: {JobState.REVIEWED, JobState.REJECTED, JobState.WITHDRAWN},
+-        JobState.REVIEWED: {JobState.APPROVED, JobState.REJECTED, JobState.WITHDRAWN},
+-        JobState.APPROVED: {JobState.DRAFTED, JobState.REJECTED, JobState.WITHDRAWN},
+-        JobState.DRAFTED: {JobState.APPLIED, JobState.REJECTED, JobState.WITHDRAWN},
+-        JobState.APPLIED: {JobState.WITHDRAWN},
+-        JobState.REJECTED: {JobState.WITHDRAWN},
++        JobState.REVIEWED: {JobState.DRAFTED, JobState.REJECTED, JobState.WITHDRAWN},
++        JobState.DRAFTED: {JobState.APPROVED, JobState.REJECTED, JobState.WITHDRAWN},
++        JobState.APPROVED: {JobState.APPLIED, JobState.REJECTED, JobState.WITHDRAWN},
++        JobState.APPLIED: set(),
++        JobState.REJECTED: set(),
+         JobState.WITHDRAWN: set(),
+     }
+ 
+     def __init__(self, session):
+         self.session = session
+ 
+-    def transition(self, job: JobModel, to_state: JobState, reason: str = "") -> JobModel:
++    def transition(self, job: JobModel, to_state: JobState, reason: str = "", dry_run: bool = False) -> tuple[JobModel, AuditLog]:
++        """
++        Transition job state.
++        If dry_run is False, state transitions are persistent and committed to the database.
++        If dry_run is True, it is a preview-only operation and no database mutations are committed.
++        """
+         current_state = JobState(job.application_status)
+         
+         if to_state not in self.VALID_TRANSITIONS.get(current_state, set()):
+             raise InvalidStateTransitionError(f"Cannot transition from {current_state} to {to_state}")
++            
++        # APPROVED cannot transition to APPLIED before a DRAFTED state.
++        # Ensure that if we are moving to APPLIED, there is a Draft in the database.
++        if to_state == JobState.APPLIED:
++            from src.models.job import Draft
++            draft_exists = self.session.query(Draft).filter_by(job_id=job.id).first()
++            if not draft_exists:
++                raise InvalidStateTransitionError("Cannot transition to APPLIED: No Draft exists for this job.")
+         
+         job.application_status = to_state.value
+         
+@@ -46,9 +59,11 @@ class ApprovalStateMachine:
+             details=json.dumps({
+                 "from_state": current_state.value,
+                 "to_state": to_state.value,
+-                "reason": reason
++                "reason": reason,
++                "dry_run": dry_run
+             })
+         )
+-        self.session.add(audit_log)
+-        self.session.commit()
+-        return job
++        if not dry_run:
++            self.session.add(audit_log)
++            self.session.commit()
++        return job, audit_log
+diff --git a/src/document_generation.py b/src/document_generation.py
+index 86284d6..4f8dd29 100644
+--- a/src/document_generation.py
++++ b/src/document_generation.py
+@@ -1,6 +1,7 @@
+ import json
+ from typing import List, Dict, Any, Tuple
+-from src.models.job import JobModel
++from sqlalchemy.exc import IntegrityError
++from src.models.job import JobModel, Draft
+ from src.models.profile import CandidateProfile, Evidence
+ from src.models.audit import AuditLog
+ 
+@@ -18,18 +19,19 @@ class DocumentGenerator:
+     def _get_verified_skills(self, verified_evidences: List[Evidence]) -> set:
+         return {e.skill.lower() for e in verified_evidences if e.verified}
+ 
+-    def _log_audit(self, action: str, entity_id: str, details: dict):
++    def _log_audit(self, action: str, entity_id: str, details: dict) -> AuditLog:
++        audit_log = AuditLog(
++            action=action,
++            entity="DocumentGenerator",
++            entity_id=entity_id,
++            details=json.dumps(details)
++        )
+         if not self.dry_run:
+-            audit_log = AuditLog(
+-                action=action,
+-                entity="DocumentGenerator",
+-                entity_id=entity_id,
+-                details=json.dumps(details)
+-            )
+             self.session.add(audit_log)
+             self.session.commit()
++        return audit_log
+ 
+-    def generate_fit_summary(self, job: JobModel, profile: CandidateProfile, verified_evidences: List[Evidence]) -> Dict[str, List[str]]:
++    def generate_fit_summary(self, job: JobModel, profile: CandidateProfile, verified_evidences: List[Evidence]) -> Tuple[Dict[str, List[str]], AuditLog]:
+         """Fit-summary generator showing matched, missing, uncertain, and negated requirements."""
+         verified_skills = self._get_verified_skills(verified_evidences)
+         job_reqs = set(s.lower() for s in (job.required_skills or []))
+@@ -43,14 +45,6 @@ class DocumentGenerator:
+ 
+         profile_must_haves = set(s.lower() for s in profile.must_have_skills)
+         profile_nice_to_haves = set(s.lower() for s in profile.nice_to_have_skills)
+-
+-        # To keep logic simple for "negated", we can check if it's explicitly excluded
+-        # Let's say if something is in a hypothetical excluded list, or just missing and we don't have it.
+-        # Based on constraints: matched, missing, uncertain, negated
+-        # matched: required/preferred skill is verified.
+-        # missing: required skill is not verified, and not in profile.
+-        # uncertain: preferred skill is not verified, or in profile but not verified evidence.
+-        
+         profile_excluded = set(s.lower() for s in getattr(profile, "excluded_skills", []))
+ 
+         for req in all_job_skills:
+@@ -64,70 +58,77 @@ class DocumentGenerator:
+                 missing.append(req)
+         
+         summary = {
+-            "matched": matched,
+-            "missing": missing,
+-            "uncertain": uncertain,
+-            "negated": negated
++            "matched": sorted(matched),
++            "missing": sorted(missing),
++            "uncertain": sorted(uncertain),
++            "negated": sorted(negated)
+         }
+         
+-        self._log_audit(
++        audit_log = self._log_audit(
+             action="GENERATE_FIT_SUMMARY",
+             entity_id=str(job.id) if job.id else getattr(job, "source_job_id", ""),
+             details=summary
+         )
+-        return summary
++        return summary, audit_log
+ 
+-    def generate_resume_keyword_suggestions(self, job: JobModel, verified_evidences: List[Evidence]) -> List[str]:
++    def generate_resume_keyword_suggestions(self, job: JobModel, verified_evidences: List[Evidence]) -> Tuple[List[str], AuditLog]:
+         """Resume-keyword suggestion generator."""
+         verified_skills = self._get_verified_skills(verified_evidences)
+         job_skills = set(s.lower() for s in (job.required_skills or []) + (job.preferred_skills or []))
+         
+-        # Suggest keywords that are verified but not explicitly mentioned? Or keywords from job that we have verified.
+-        suggestions = [skill for skill in job_skills if skill in verified_skills]
++        suggestions = sorted([skill for skill in job_skills if skill in verified_skills])
+         
+-        self._log_audit(
++        audit_log = self._log_audit(
+             action="GENERATE_RESUME_KEYWORDS",
+             entity_id=str(job.id) if job.id else getattr(job, "source_job_id", ""),
+             details={"suggestions": suggestions}
+         )
+-        return suggestions
++        return suggestions, audit_log
+ 
+-    def generate_cover_letter_draft(self, job: JobModel, profile: CandidateProfile, verified_evidences: List[Evidence]) -> str:
++    def generate_cover_letter_draft(self, job: JobModel, profile: CandidateProfile, verified_evidences: List[Evidence]) -> Tuple[str, AuditLog]:
+         """Tailored cover-letter draft generator. Marks unsupported claims as [VERIFY]."""
+         verified_skills = self._get_verified_skills(verified_evidences)
+         job_id_str = str(job.id) if job.id else getattr(job, "source_job_id", "")
+         
+-        # Check if draft already generated for this job to throw duplicate draft error
+         if not self.dry_run:
+-            if job.id:
+-                # Acquire a lock on the job row to prevent concurrent draft generations
+-                self.session.query(JobModel).filter_by(id=job.id).with_for_update().first()
++            if not job.id:
++                raise ValueError("Job must be saved to DB before generating drafts in real mode.")
+             
+-            existing_logs = self.session.query(AuditLog).filter_by(
+-                action="GENERATE_COVER_LETTER_DRAFT", 
+-                entity_id=job_id_str
++            existing_draft = self.session.query(Draft).filter_by(
++                job_id=job.id, document_type="cover_letter", version=1
+             ).first()
+-            if existing_logs:
++            if existing_draft:
+                 raise DuplicateDraftError("Draft already generated for this job.")
+         
+-        if not verified_evidences:
++        has_verified = any(e.verified for e in verified_evidences)
++        if not has_verified:
+             raise MissingEvidenceError("No verified evidence provided for cover letter generation.")
+             
+         draft_parts = []
+         draft_parts.append(f"Dear Hiring Manager at {job.company},")
+         draft_parts.append(f"I am writing to apply for the {job.title} position.")
+         
+-        for skill in (job.required_skills or []):
++        for skill in sorted(job.required_skills or []):
+             if skill.lower() in verified_skills:
+                 draft_parts.append(f"I have proven experience with {skill}.")
+             else:
+-                draft_parts.append(f"I am familiar with {skill} [VERIFY].")
++                draft_parts.append(f"[VERIFY: {skill} experience]")
+                 
+         draft = "\n\n".join(draft_parts)
+         
+-        self._log_audit(
++        audit_log = self._log_audit(
+             action="GENERATE_COVER_LETTER_DRAFT",
+             entity_id=job_id_str,
+             details={"draft_preview": draft[:100]}
+         )
+-        return draft
++        
++        if not self.dry_run:
++            try:
++                new_draft = Draft(job_id=job.id, document_type="cover_letter", version=1, content=draft)
++                self.session.add(new_draft)
++                self.session.commit()
++            except IntegrityError:
++                self.session.rollback()
++                raise DuplicateDraftError("Draft already generated for this job concurrently.")
++                
++        return draft, audit_log
+diff --git a/src/models/__pycache__/job.cpython-312.pyc b/src/models/__pycache__/job.cpython-312.pyc
+index 5d15fde..4b26a57 100644
+Binary files a/src/models/__pycache__/job.cpython-312.pyc and b/src/models/__pycache__/job.cpython-312.pyc differ
+diff --git a/src/models/job.py b/src/models/job.py
+index 005285b..776e3db 100644
+--- a/src/models/job.py
++++ b/src/models/job.py
+@@ -1,10 +1,24 @@
+ from datetime import datetime, UTC
+ from typing import Optional, List
+ from pydantic import BaseModel, Field, HttpUrl
+-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text
++from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, ForeignKey, UniqueConstraint
+ from src.models.base import Base, JSONList
+ import json
+ 
++class Draft(Base):
++    __tablename__ = "drafts"
++
++    id = Column(Integer, primary_key=True, index=True)
++    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
++    document_type = Column(String, nullable=False)
++    version = Column(Integer, default=1)
++    content = Column(Text, nullable=False)
++    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
++
++    __table_args__ = (
++        UniqueConstraint('job_id', 'document_type', 'version', name='_job_doc_version_uc'),
++    )
++
+ class JobModel(Base):
+     __tablename__ = "jobs"
+ 
+diff --git a/tests/__pycache__/test_milestone3.cpython-312-pytest-9.1.1.pyc b/tests/__pycache__/test_milestone3.cpython-312-pytest-9.1.1.pyc
+index 0f70277..9abd9ea 100644
+Binary files a/tests/__pycache__/test_milestone3.cpython-312-pytest-9.1.1.pyc and b/tests/__pycache__/test_milestone3.cpython-312-pytest-9.1.1.pyc differ
+diff --git a/tests/test_milestone3.py b/tests/test_milestone3.py
+index c5a73b7..9d18937 100644
+--- a/tests/test_milestone3.py
++++ b/tests/test_milestone3.py
+@@ -1,8 +1,9 @@
+ import pytest
++import json
+ from sqlalchemy import create_engine
+ from sqlalchemy.orm import sessionmaker
+ from src.models.base import Base
+-from src.models.job import JobModel
++from src.models.job import JobModel, Draft
+ from src.models.profile import CandidateProfile, Evidence
+ from src.models.audit import AuditLog
+ from src.approval import ApprovalStateMachine, JobState, InvalidStateTransitionError
+@@ -28,33 +29,52 @@ def test_invalid_state_transitions(session):
+     state_machine.transition(job, JobState.REVIEWED)
+     assert job.application_status == JobState.REVIEWED.value
+     
+-    # Invalid: REVIEWED -> DRAFTED (must go through APPROVED)
++    # REVIEWED cannot transition directly to APPROVED
+     with pytest.raises(InvalidStateTransitionError):
+-        state_machine.transition(job, JobState.DRAFTED)
++        state_machine.transition(job, JobState.APPROVED)
+         
+-    # Invalid: APPLIED -> APPROVED (cannot go backwards like that)
+-    state_machine.transition(job, JobState.APPROVED) # REVIEWED -> APPROVED is valid
+-    state_machine.transition(job, JobState.DRAFTED) # APPROVED -> DRAFTED is valid
+-    state_machine.transition(job, JobState.APPLIED) # DRAFTED -> APPLIED is valid
++    # NEW cannot transition directly to APPLIED
++    job2 = JobModel(source="test", source_job_id="2", canonical_url="http://test.com", title="SE", company="Test")
++    session.add(job2)
++    session.commit()
++    with pytest.raises(InvalidStateTransitionError):
++        state_machine.transition(job2, JobState.APPLIED)
++
++    # Valid path to APPROVED
++    state_machine.transition(job, JobState.DRAFTED)
++    state_machine.transition(job, JobState.APPROVED)
+     
++    # APPROVED cannot transition to APPLIED before a DRAFTED state
++    # (i.e. if there's no actual Draft in the database)
++    job3 = JobModel(source="test", source_job_id="3_new", canonical_url="http://test.com", title="SE", company="Test", application_status="APPROVED")
++    session.add(job3)
++    session.commit()
++    with pytest.raises(InvalidStateTransitionError, match="No Draft exists"):
++        state_machine.transition(job3, JobState.APPLIED)
++
++    # Add draft so job can transition to APPLIED
++    draft = Draft(job_id=job.id, document_type="cover_letter", content="test")
++    session.add(draft)
++    session.commit()
++    
++    # Terminal states cannot be reused
++    state_machine.transition(job, JobState.APPLIED)
+     with pytest.raises(InvalidStateTransitionError):
+-        state_machine.transition(job, JobState.APPROVED)
++        state_machine.transition(job, JobState.WITHDRAWN)
+         
+ def test_approval_denial(session):
+-    job = JobModel(source="test", source_job_id="2", canonical_url="http://test.com", title="SE", company="Test")
++    job = JobModel(source="test", source_job_id="3", canonical_url="http://test.com", title="SE", company="Test")
+     session.add(job)
+     session.commit()
+     
+     state_machine = ApprovalStateMachine(session)
+     state_machine.transition(job, JobState.REVIEWED)
+-    
+-    # User denies approval
+     state_machine.transition(job, JobState.REJECTED)
+     assert job.application_status == JobState.REJECTED.value
+     
+ def test_unsupported_claims_marked_verify(session):
+     job = JobModel(
+-        source="test", source_job_id="3", canonical_url="http://test.com", title="SE", company="Test",
++        source="test", source_job_id="4", canonical_url="http://test.com", title="SE", company="Test",
+         required_skills=["Python", "Go", "Rust"]
+     )
+     profile = CandidateProfile()
+@@ -64,15 +84,15 @@ def test_unsupported_claims_marked_verify(session):
+     ]
+     
+     doc_gen = DocumentGenerator(session, dry_run=True)
+-    draft = doc_gen.generate_cover_letter_draft(job, profile, evidences)
++    draft, audit = doc_gen.generate_cover_letter_draft(job, profile, evidences)
+     
+     assert "proven experience with Python" in draft
+-    assert "familiar with Go [VERIFY]" in draft
+-    assert "familiar with Rust [VERIFY]" in draft
++    assert "[VERIFY: Go experience]" in draft
++    assert "[VERIFY: Rust experience]" in draft
+     
+ def test_missing_evidence(session):
+     job = JobModel(
+-        source="test", source_job_id="4", canonical_url="http://test.com", title="SE", company="Test",
++        source="test", source_job_id="5", canonical_url="http://test.com", title="SE", company="Test",
+         required_skills=["Python"]
+     )
+     profile = CandidateProfile()
+@@ -81,10 +101,41 @@ def test_missing_evidence(session):
+     doc_gen = DocumentGenerator(session, dry_run=True)
+     with pytest.raises(MissingEvidenceError):
+         doc_gen.generate_cover_letter_draft(job, profile, evidences)
+-        
++
++def test_only_unverified_evidence(session):
++    job = JobModel(
++        source="test", source_job_id="5_1", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python"]
++    )
++    profile = CandidateProfile()
++    evidences = [Evidence(skill="Python", source_type="resume", reference="ref", verified=False)]
++    
++    doc_gen = DocumentGenerator(session, dry_run=True)
++    with pytest.raises(MissingEvidenceError):
++        doc_gen.generate_cover_letter_draft(job, profile, evidences)
++
++def test_mixed_evidence(session):
++    job = JobModel(
++        source="test", source_job_id="5_2", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python", "Go"]
++    )
++    session.add(job)
++    session.commit()
++    profile = CandidateProfile()
++    evidences = [
++        Evidence(skill="Python", source_type="resume", reference="ref", verified=True),
++        Evidence(skill="Go", source_type="resume", reference="ref", verified=False)
++    ]
++    
++    doc_gen = DocumentGenerator(session, dry_run=False)
++    draft, audit = doc_gen.generate_cover_letter_draft(job, profile, evidences)
++    
++    assert "proven experience with Python" in draft
++    assert "[VERIFY: Go experience]" in draft
++    
+ def test_duplicate_drafts(session):
+     job = JobModel(
+-        source="test", source_job_id="5", canonical_url="http://test.com", title="SE", company="Test",
++        source="test", source_job_id="6", canonical_url="http://test.com", title="SE", company="Test",
+         required_skills=["Python"]
+     )
+     session.add(job)
+@@ -98,25 +149,63 @@ def test_duplicate_drafts(session):
+     with pytest.raises(DuplicateDraftError):
+         doc_gen.generate_cover_letter_draft(job, profile, evidences)
+ 
+-def test_fit_summary(session):
++def test_fit_summary_deterministic(session):
+     job = JobModel(
+-        source="test", source_job_id="6", canonical_url="http://test.com", title="SE", company="Test",
+-        required_skills=["Python", "Docker"],
+-        preferred_skills=["Kubernetes"]
++        source="test", source_job_id="7", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python", "Docker", "AWS"],
++        preferred_skills=["Kubernetes", "Rust"]
+     )
+-    profile = CandidateProfile(must_have_skills=["Python", "Docker", "Kubernetes"])
++    profile = CandidateProfile(must_have_skills=["Python", "Docker", "Kubernetes", "AWS"])
+     evidences = [
+-        Evidence(skill="Python", source_type="resume", reference="ref", verified=True)
++        Evidence(skill="Python", source_type="resume", reference="ref", verified=True),
++        Evidence(skill="AWS", source_type="resume", reference="ref", verified=True)
+     ]
+     
+     doc_gen = DocumentGenerator(session, dry_run=True)
+-    summary = doc_gen.generate_fit_summary(job, profile, evidences)
++    summary, audit = doc_gen.generate_fit_summary(job, profile, evidences)
+     
+-    assert "python" in summary["matched"]
+-    # Docker is required, but evidence is missing, however it's in must_have_skills, so it should be in uncertain
+-    assert "docker" in summary["uncertain"]
+-    # Kubernetes is preferred, not verified, but in must_have_skills -> uncertain
+-    assert "kubernetes" in summary["uncertain"]
++    assert summary["matched"] == ["aws", "python"]
++    assert summary["uncertain"] == ["docker", "kubernetes"]
++    assert summary["missing"] == ["rust"]
++
++def test_resume_keyword_suggestions_deterministic(session):
++    job = JobModel(
++        source="test", source_job_id="8", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python", "Docker", "Zookeeper"],
++        preferred_skills=["Kubernetes", "AWS", "Babel"]
++    )
++    evidences = [
++        Evidence(skill="Python", source_type="resume", reference="ref", verified=True),
++        Evidence(skill="Zookeeper", source_type="resume", reference="ref", verified=True),
++        Evidence(skill="AWS", source_type="resume", reference="ref", verified=True),
++        Evidence(skill="Babel", source_type="resume", reference="ref", verified=True),
++        Evidence(skill="GCP", source_type="resume", reference="ref", verified=True)
++    ]
++    
++    doc_gen = DocumentGenerator(session, dry_run=True)
++    suggestions, audit = doc_gen.generate_resume_keyword_suggestions(job, evidences)
++    
++    assert suggestions == ["aws", "babel", "python", "zookeeper"]
++
++def test_dry_run_behavior(session):
++    job = JobModel(
++        source="test", source_job_id="9", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python"]
++    )
++    session.add(job)
++    session.commit()
++    profile = CandidateProfile()
++    evidences = [Evidence(skill="Python", source_type="resume", reference="ref", verified=True)]
++    
++    doc_gen = DocumentGenerator(session, dry_run=True)
++    draft, audit = doc_gen.generate_cover_letter_draft(job, profile, evidences)
++    
++    # Audit log should be returned but not persisted
++    assert audit.action == "GENERATE_COVER_LETTER_DRAFT"
++    
++    # Check DB
++    assert session.query(Draft).count() == 0
++    assert session.query(AuditLog).count() == 0
+ 
+ def test_fit_summary_negated(session):
+     job = JobModel(
+@@ -129,27 +218,67 @@ def test_fit_summary_negated(session):
+     ]
+     
+     doc_gen = DocumentGenerator(session, dry_run=True)
+-    summary = doc_gen.generate_fit_summary(job, profile, evidences)
++    summary, audit = doc_gen.generate_fit_summary(job, profile, evidences)
+     
+     assert "python" in summary["matched"]
+     assert "c++" in summary["negated"]
+ 
+-def test_resume_keyword_suggestions(session):
++def test_draft_job_not_saved():
+     job = JobModel(
+-        source="test", source_job_id="7", canonical_url="http://test.com", title="SE", company="Test",
+-        required_skills=["Python", "Docker"],
+-        preferred_skills=["Kubernetes", "AWS"]
++        source="test", source_job_id="unsaved", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python"]
+     )
+-    evidences = [
+-        Evidence(skill="Python", source_type="resume", reference="ref", verified=True),
+-        Evidence(skill="AWS", source_type="resume", reference="ref", verified=True),
+-        Evidence(skill="GCP", source_type="resume", reference="ref", verified=True)
+-    ]
++    profile = CandidateProfile()
++    evidences = [Evidence(skill="Python", source_type="resume", reference="ref", verified=True)]
+     
+-    doc_gen = DocumentGenerator(session, dry_run=True)
+-    suggestions = doc_gen.generate_resume_keyword_suggestions(job, evidences)
++    doc_gen = DocumentGenerator(None, dry_run=False)
++    with pytest.raises(ValueError, match="Job must be saved to DB"):
++        doc_gen.generate_cover_letter_draft(job, profile, evidences)
++
++def test_draft_integrity_error(session, monkeypatch):
++    job = JobModel(
++        source="test", source_job_id="10", canonical_url="http://test.com", title="SE", company="Test",
++        required_skills=["Python"]
++    )
++    session.add(job)
++    session.commit()
++    profile = CandidateProfile()
++    evidences = [Evidence(skill="Python", source_type="resume", reference="ref", verified=True)]
++    
++    doc_gen = DocumentGenerator(session, dry_run=False)
++    
++    class MockQuery:
++        def filter_by(self, **kwargs):
++            return self
++        def first(self):
++            return None
++            
++    original_query = session.query
++    def mock_query(*args, **kwargs):
++        if args and args[0] == Draft:
++            return MockQuery()
++        return original_query(*args, **kwargs)
++        
++    monkeypatch.setattr(session, 'query', mock_query)
++    
++    new_draft = Draft(job_id=job.id, document_type="cover_letter", version=1, content="Test")
++    session.add(new_draft)
++    session.commit()
++    
++    with pytest.raises(DuplicateDraftError, match="concurrently"):
++        doc_gen.generate_cover_letter_draft(job, profile, evidences)
++
++
++
++def test_transition_dry_run(session):
++    job = JobModel(source="test", source_job_id="99", canonical_url="http://test.com", title="SE", company="Test")
++    session.add(job)
++    session.commit()
++    
++    state_machine = ApprovalStateMachine(session)
++    job_ret, audit = state_machine.transition(job, JobState.REVIEWED, dry_run=True)
+     
+-    assert "python" in suggestions
+-    assert "aws" in suggestions
+-    assert "gcp" not in suggestions # Not in job requirements/preferences
+-    assert "docker" not in suggestions # Not in verified evidence
++    # Check that audit log is created but NOT saved
++    assert audit.action == "STATE_TRANSITION"
++    assert "dry_run" in audit.details
++    assert session.query(AuditLog).count() == 0
