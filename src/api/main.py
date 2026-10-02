@@ -76,8 +76,19 @@ def review_job(job_id: int, request: ReviewRequest, db: Session = Depends(get_db
     generator = DocumentGenerator(db, dry_run=True)
     fit_summary, _ = generator.generate_fit_summary(job, request.profile, request.evidence)
     
+    from src.scoring import calculate_fit_score
+    # We must construct a JobCreate to pass to calculate_fit_score
+    job_create = JobCreate.model_validate(job.__dict__)
+    
+    # We must assign evidence registry to profile for calculate_fit_score to work
+    request.profile.evidence_registry = request.evidence
+    
+    score, breakdown = calculate_fit_score(job_create, request.profile)
+    
     return {
         "job": JobRead.model_validate(job).model_dump(),
+        "fit_score": score,
+        "fit_score_breakdown": breakdown,
         "fit_summary": fit_summary,
         "verified_evidence": [e.model_dump() for e in request.evidence if e.verified]
     }

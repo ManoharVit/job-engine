@@ -101,6 +101,8 @@ def test_review_job_endpoint(client, test_db):
     assert response.status_code == 200
     data = response.json()
     assert "fit_summary" in data
+    assert "fit_score" in data
+    assert "fit_score_breakdown" in data
     assert "python" in data["fit_summary"]["matched"]
     assert "java" in data["fit_summary"]["missing"]
 
@@ -205,3 +207,160 @@ def test_export_unapproved_application(client):
     response = client.get(f"/api/jobs/{job_id}/export")
     assert response.status_code == 400
     assert "Application is not APPROVED" in response.json()["detail"]
+
+def test_deterministic_output(client, test_db):
+    res = client.post("/api/jobs", json={
+        "source": "manual", "source_job_id": "det1", "canonical_url": "http://example.com/det",
+        "title": "Engineer", "company": "Corp", "required_skills": ["Python", "Docker"]
+    })
+    job_id = res.json()["id"]
+    
+    profile_data = {
+        "profile": {
+            "must_have_skills": ["Python"]
+        },
+        "evidence": [
+            {"skill": "Python", "source_type": "resume", "reference": "ref", "verified": True}
+        ]
+    }
+    
+    response1 = client.post(f"/api/jobs/{job_id}/review", json=profile_data)
+    response2 = client.post(f"/api/jobs/{job_id}/review", json=profile_data)
+    
+    assert response1.json() == response2.json()
+
+def test_database_rollback(client, test_db, monkeypatch):
+    res = client.post("/api/jobs", json={
+        "source": "manual", "source_job_id": "roll1", "canonical_url": "http://example.com/roll",
+        "title": "Engineer", "company": "Corp", "required_skills": ["Python"]
+    })
+    job_id = res.json()["id"]
+    
+    client.post(f"/api/jobs/{job_id}/state", json={"state": "REVIEWED", "reason": "ok", "dry_run": False})
+    
+    profile_data = {
+        "profile": {},
+        "evidence": [
+            {"skill": "Python", "source_type": "resume", "reference": "ref", "verified": True}
+        ]
+    }
+    
+    # We will simulate a failure during the DB commit in generate_cover_letter_draft
+    # Since dry_run=False, it will try to write Draft and AuditLog.
+    # Let's mock the session commit to raise an error
+    
+    def mock_commit():
+        raise Exception("DB failure")
+        
+    original_commit = test_db.commit
+    monkeypatch.setattr(test_db, "commit", mock_commit)
+    
+    try:
+        response = client.post(f"/api/jobs/{job_id}/draft?dry_run=false", json=profile_data)
+        assert response.status_code == 500
+    except Exception as e:
+        assert str(e) == "DB failure"
+        
+    # Restore commit
+    monkeypatch.setattr(test_db, "commit", original_commit)
+    
+    # Check that there's no Draft in the DB
+    from src.models.job import Draft
+    drafts = test_db.query(Draft).filter_by(job_id=job_id).all()
+    assert len(drafts) == 0
+
+def test_csv_edge_cases(client, test_db):
+    # Misquoted multiline description and omitted skill columns
+    csv_content = """source,source_job_id,canonical_url,title,company,description
+manual,edge_1,https://example.com/edge,Title,Company,"This is a 
+multiline description"
+manual,edge_2,https://example.com/edge2,Title2,,Desc"""
+    response = client.post("/api/jobs/csv", content=csv_content, headers={"Content-Type": "text/csv"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["imported"] == 2
+    assert len(data["rejected"]) == 0
+    
+def test_draft_missing_evidence(client, test_db):
+    res = client.post("/api/jobs", json={
+        "source": "manual", "source_job_id": "draftmiss", "canonical_url": "http://example.com",
+        "title": "Engineer", "company": "Corp", "required_skills": ["Python"]
+    })
+    job_id = res.json()["id"]
+    
+    # Missing evidence should fail
+    profile_data_no_evidence = {
+        "profile": {},
+        "evidence": [
+            {"skill": "Python", "source_type": "resume", "reference": "ref", "verified": False}
+        ]
+    }
+    response = client.post(f"/api/jobs/{job_id}/draft?dry_run=true", json=profile_data_no_evidence)
+    assert response.status_code == 400
+    assert "No verified evidence" in response.json()["detail"]
+
+def test_draft_duplicate(client, test_db):
+    res = client.post("/api/jobs", json={
+        "source": "manual", "source_job_id": "draftdup", "canonical_url": "http://example.com",
+        "title": "Engineer", "company": "Corp", "required_skills": ["Python"]
+    })
+    job_id = res.json()["id"]
+    client.post(f"/api/jobs/{job_id}/state", json={"state": "REVIEWED", "reason": "ok", "dry_run": False})
+    
+    profile_data = {
+        "profile": {},
+        "evidence": [
+            {"skill": "Python", "source_type": "resume", "reference": "ref", "verified": True}
+        ]
+    }
+    
+    response = client.post(f"/api/jobs/{job_id}/draft?dry_run=false", json=profile_data)
+    assert response.status_code == 200
+    
+    response2 = client.post(f"/api/jobs/{job_id}/draft?dry_run=false", json=profile_data)
+    assert response2.status_code == 400
+    assert "Draft already generated" in response2.json()["detail"]
+
+def test_job_not_saved_draft_real_mode(client, test_db, monkeypatch):
+    # Testing ValueError: job.id is None in real mode
+    from src.models.job import JobModel
+    from src.models.profile import CandidateProfile, Evidence
+    from src.document_generation import DocumentGenerator
+    
+    job = JobModel(title="T", company="C", source="m")
+    gen = DocumentGenerator(test_db, dry_run=False)
+    try:
+        gen.generate_cover_letter_draft(job, CandidateProfile(must_have_skills=[]), [Evidence(skill="a", source_type="resume", reference="ref", verified=True)])
+        assert False
+    except ValueError as e:
+        assert "Job must be saved to DB" in str(e)
+
+def test_api_404s(client):
+    assert client.get("/api/jobs/999").status_code == 404
+    assert client.post("/api/jobs/999/review", json={"profile":{}, "evidence":[]}).status_code == 404
+    assert client.post("/api/jobs/999/draft", json={"profile":{}, "evidence":[]}).status_code == 404
+    assert client.post("/api/jobs/999/state", json={"state":"APPROVED", "reason":"ok"}).status_code == 404
+    assert client.get("/api/jobs/999/export").status_code == 404
+
+def test_csv_import_duplicate(client, test_db):
+    # Insert first to make existing
+    client.post("/api/jobs", json={
+        "source": "manual", "source_job_id": "dup1", "canonical_url": "http://dup.com",
+        "title": "Dup", "company": "Company", "required_skills": []
+    })
+    csv_content = """source,source_job_id,canonical_url,title,company,description\nmanual,dup2,http://dup.com,Dup,Company,Desc"""
+    response = client.post("/api/jobs/csv", content=csv_content, headers={"Content-Type": "text/csv"})
+    assert response.status_code == 200
+    assert response.json()["imported"] == 0
+    assert len(response.json()["rejected"]) == 1
+
+def test_csv_import_db_error(client, test_db, monkeypatch):
+    import src.api.main as main_api
+    def mock_create(*args, **kwargs):
+        raise Exception("DB Error")
+    monkeypatch.setattr(main_api, "create_job", mock_create)
+    csv_content = """source,source_job_id,canonical_url,title,company,description\nmanual,db1,http://db.com,DB,Company,Desc"""
+    response = client.post("/api/jobs/csv", content=csv_content, headers={"Content-Type": "text/csv"})
+    assert response.status_code == 200
+    assert response.json()["imported"] == 0
+    assert "DB Error" in response.json()["rejected"][0]["error"]
