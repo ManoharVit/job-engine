@@ -21,7 +21,7 @@ class CSVIngestor(JobIngestor):
         jobs = []
         rejected = []
         reader = csv.DictReader(io.StringIO(source_data.strip()))
-        for row in reader:
+        for idx, row in enumerate(reader, start=2):
             url = row.get("url") or row.get("canonical_url", "")
             canonical = canonicalize_url(url)
             
@@ -47,7 +47,7 @@ class CSVIngestor(JobIngestor):
                 )
                 jobs.append(job)
             except ValidationError as e:
-                rejected.append({"row": row, "error": str(e)})
+                rejected.append({"row_number": idx, "row": row, "error": str(e)})
         return jobs, rejected
 
 class URLIngestor(JobIngestor):

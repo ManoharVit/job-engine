@@ -49,7 +49,7 @@ async def import_csv_jobs(csv_content: str = Body(..., media_type="text/csv"), d
             imported_count += 1
         except Exception as e:
             db.rollback()
-            rejected.append({"row": {"title": job.title}, "error": str(e)})
+            rejected.append({"row": {"title": job.title}, "error": "Database error occurred saving job"})
             
     return {"imported": imported_count, "rejected": rejected}
 

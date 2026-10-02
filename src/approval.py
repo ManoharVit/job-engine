@@ -45,6 +45,9 @@ class ApprovalStateMachine:
         """
         current_state = JobState(job.application_status)
         
+        if to_state in (JobState.REJECTED, JobState.WITHDRAWN) and not reason.strip():
+            raise InvalidStateTransitionError(f"A reason is required when transitioning to {to_state.value}")
+
         if to_state not in self.VALID_TRANSITIONS.get(current_state, set()):
             raise InvalidStateTransitionError(f"Cannot transition from {current_state} to {to_state}")
             
