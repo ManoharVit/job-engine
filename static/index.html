@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Job Engine UI</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        h1 { color: #333; }
+        .job-card { border: 1px solid #ccc; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+        .job-card h3 { margin-top: 0; }
+        .actions { margin-top: 10px; }
+        button { padding: 5px 10px; margin-right: 5px; cursor: pointer; }
+        #details-pane { display: none; margin-top: 20px; padding: 15px; border: 1px solid #aaa; background: #f9f9f9; }
+        pre { background: #eee; padding: 10px; white-space: pre-wrap; }
+        .grid { display: flex; gap: 20px; }
+        .list-col { flex: 1; max-width: 400px; }
+        .details-col { flex: 2; }
+    </style>
+</head>
+<body>
+    <h1>Job Engine Web Interface</h1>
+    <div class="actions" style="margin-bottom: 20px;">
+        <button onclick="loadJobs()">Refresh Jobs</button>
+        <button onclick="addSyntheticJob()">+ Add Synthetic Job</button>
+    </div>
+
+    <div class="grid">
+        <div class="list-col" id="job-list">
+            <p>Loading jobs...</p>
+        </div>
+
+        <div class="details-col" id="details-pane">
+            <h2 id="det-title"></h2>
+            <p><strong>Company:</strong> <span id="det-company"></span> | <strong>Status:</strong> <span id="det-status"></span></p>
+            
+            <div class="actions" id="state-actions"></div>
+            
+            <h3>Review Results</h3>
+            <button onclick="reviewJob()">Run Review / Calculate Fit</button>
+            <div id="review-results"></div>
+
+            <h3>Draft Preview</h3>
+            <button onclick="draftJob()">Generate Draft (Dry Run)</button>
+            <div id="draft-results"></div>
+            
+            <h3>Export</h3>
+            <button onclick="exportJob()" id="btn-export" disabled>Export Application (Requires APPROVED status)</button>
+            <div id="export-results"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentJobId = null;
+
+        const syntheticJob = {
+          "source": "manual-test",
+          "source_job_id": "demo-" + Math.floor(Math.random()*10000),
+          "canonical_url": "https://example.com/jobs/demo",
+          "title": "Python Backend Engineer",
+          "company": "Example Systems",
+          "location": "Remote - India",
+          "description": "Build reliable Python APIs and data pipelines. Experience with FastAPI, PostgreSQL, SQLAlchemy, Docker, and automated testing is preferred.",
+          "required_skills": ["Python", "FastAPI", "SQL", "PostgreSQL"],
+          "preferred_skills": ["Docker", "Celery"],
+          "application_status": "NEW"
+        };
+
+        const syntheticReview = {
+          "profile": {
+            "target_roles": ["Python Backend Engineer", "Backend Developer", "Data Engineer"],
+            "must_have_skills": ["Python", "FastAPI", "SQL"],
+            "nice_to_have_skills": ["PostgreSQL", "Docker", "Celery"],
+            "excluded_skills": []
+          },
+          "evidence": [
+            { "skill": "Python", "source_type": "verified_resume", "reference": "resume-project-1", "verified": true },
+            { "skill": "FastAPI", "source_type": "verified_project", "reference": "project-api-1", "verified": true },
+            { "skill": "SQL", "source_type": "verified_project", "reference": "project-data-1", "verified": true }
+          ]
+        };
+
+        async function apiCall(path, method="GET", body=null) {
+            const opts = { method, headers: {} };
+            if (body) {
+                opts.headers['Content-Type'] = 'application/json';
+                opts.body = JSON.stringify(body);
+            }
+            const res = await fetch(`/api${path}`, opts);
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`API Error ${res.status}: ${text}`);
+            }
+            return res.json();
+        }
+
+        async function addSyntheticJob() {
+            try {
+                syntheticJob.source_job_id = "demo-" + Math.floor(Math.random()*100000);
+                await apiCall('/jobs', 'POST', syntheticJob);
+                loadJobs();
+            } catch (e) { alert(e); }
+        }
+
+        async function loadJobs() {
+            try {
+                const jobs = await apiCall('/jobs');
+                const html = jobs.map(j => `
+                    <div class="job-card" onclick="showJob(${j.id})">
+                        <h3>${j.title}</h3>
+                        <p>${j.company}</p>
+                        <p>Status: ${j.application_status}</p>
+                    </div>
+                `).join('');
+                document.getElementById('job-list').innerHTML = html || "<p>No jobs found.</p>";
+            } catch (e) { alert(e); }
+        }
+
+        async function showJob(id) {
+            currentJobId = id;
+            try {
+                const job = await apiCall(`/jobs/${id}`);
+                document.getElementById('details-pane').style.display = 'block';
+                document.getElementById('det-title').innerText = job.title;
+                document.getElementById('det-company').innerText = job.company;
+                document.getElementById('det-status').innerText = job.application_status;
+                
+                document.getElementById('review-results').innerHTML = '';
+                document.getElementById('draft-results').innerHTML = '';
+                document.getElementById('export-results').innerHTML = '';
+                
+                renderStateActions(job.application_status);
+                document.getElementById('btn-export').disabled = (job.application_status !== 'APPROVED');
+            } catch (e) { alert(e); }
+        }
+
+        function renderStateActions(status) {
+            const c = document.getElementById('state-actions');
+            let nextState = null;
+            if (status === 'NEW') nextState = 'REVIEWED';
+            else if (status === 'REVIEWED') nextState = 'DRAFTED';
+            else if (status === 'DRAFTED') nextState = 'APPROVED';
+            
+            if (nextState) {
+                c.innerHTML = `<button onclick="transitionState('${nextState}')">Move to ${nextState}</button>`;
+            } else {
+                c.innerHTML = `<em>No standard forward transitions from ${status}</em>`;
+            }
+        }
+
+        async function transitionState(newState) {
+            try {
+                const req = { state: newState, reason: "Web UI Transition" };
+                const job = await apiCall(`/jobs/${currentJobId}/state`, 'POST', req);
+                showJob(currentJobId);
+                loadJobs();
+            } catch (e) { alert(e); }
+        }
+
+        async function reviewJob() {
+            try {
+                const res = await apiCall(`/jobs/${currentJobId}/review`, 'POST', syntheticReview);
+                document.getElementById('review-results').innerHTML = `
+                    <p><strong>Fit Score:</strong> ${res.fit_score}</p>
+                    <p><strong>Matched Skills:</strong> ${res.fit_summary.matched.join(', ')}</p>
+                    <p><strong>Missing Skills:</strong> ${res.fit_summary.missing.join(', ')}</p>
+                    <p><strong>Uncertain Skills:</strong> ${res.fit_summary.uncertain.join(', ')}</p>
+                    <pre>${JSON.stringify(res.fit_score_breakdown, null, 2)}</pre>
+                `;
+            } catch (e) { alert(e); }
+        }
+
+        async function draftJob() {
+            try {
+                const res = await apiCall(`/jobs/${currentJobId}/draft?dry_run=true`, 'POST', syntheticReview);
+                document.getElementById('draft-results').innerHTML = `
+                    <pre>${res.draft}</pre>
+                `;
+            } catch (e) { alert(e); }
+        }
+
+        async function exportJob() {
+            try {
+                const res = await apiCall(`/jobs/${currentJobId}/export`);
+                document.getElementById('export-results').innerHTML = `
+                    <pre>${JSON.stringify(res, null, 2)}</pre>
+                `;
+            } catch (e) { alert(e); }
+        }
+
+        loadJobs();
+    </script>
+</body>
+</html>

@@ -38,6 +38,17 @@ def client(test_db):
     yield TestClient(app)
     app.dependency_overrides.clear()
 
+def test_lifespan_startup(test_db):
+    def override_get_db():
+        yield test_db
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/jobs")
+            assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
 def test_manual_job_import(client):
     payload = {
         "source": "manual",

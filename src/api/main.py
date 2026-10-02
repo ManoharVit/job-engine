@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Body, Query
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="Job Engine API", lifespan=lifespan)
+app.mount("/ui", StaticFiles(directory="static", html=True), name="static")
 
 class ReviewRequest(BaseModel):
     profile: CandidateProfile
