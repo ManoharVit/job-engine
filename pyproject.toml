@@ -21,3 +21,12 @@ dev = [
     "pytest-cov>=5.0.0",
     "anyio>=4.14.2,<5.0.0",
 ]
+
+
+[tool.pytest.ini_options]
+# We ignore the httpx2 deprecation warning from Starlette's TestClient because httpx2 is a known malicious typosquat. We refuse to install it.
+# We also ignore the anyio deprecation warning triggered by Starlette internally.
+filterwarnings = [
+    "ignore:.*httpx.*:DeprecationWarning",
+    "ignore:.*anyio.*:DeprecationWarning",
+]

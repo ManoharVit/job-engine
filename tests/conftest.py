@@ -1,4 +1,13 @@
 import pytest
+import warnings
+
+# We must pre-import TestClient within a catch_warnings block because
+# pytest -Wd overrides filterwarnings in pyproject.toml at the module level.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    from fastapi.testclient import TestClient
+
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from src.models.base import Base
