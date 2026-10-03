@@ -38,6 +38,14 @@
             <button onclick="reviewJob()">Run Review / Calculate Fit</button>
             <div id="review-results"></div>
 
+            <h3>Interview Preparation</h3>
+            <button onclick="prepInterview()">Generate Interview Guide</button>
+            <div id="interview-actions" style="display:none; margin-top:10px;">
+                <button onclick="exportInterviewJson()">Export JSON</button>
+                <button onclick="exportInterviewMd()">Export Markdown</button>
+            </div>
+            <div id="interview-results"></div>
+
             <h3>Draft Preview</h3>
             <button onclick="draftJob()">Generate Draft (Dry Run)</button>
             <div id="draft-results"></div>
@@ -124,6 +132,9 @@
                 document.getElementById('det-status').innerText = job.application_status;
                 
                 document.getElementById('review-results').innerHTML = '';
+                document.getElementById('interview-results').innerHTML = '';
+                document.getElementById('interview-actions').style.display = 'none';
+                lastInterviewGuide = null;
                 document.getElementById('draft-results').innerHTML = '';
                 document.getElementById('export-results').innerHTML = '';
                 
@@ -175,6 +186,39 @@
                     <pre>${res.draft}</pre>
                 `;
             } catch (e) { alert(e); }
+        }
+
+        let lastInterviewGuide = null;
+
+        async function prepInterview() {
+            try {
+                const res = await apiCall(`/jobs/${currentJobId}/interview-guide`, 'POST', syntheticReview);
+                lastInterviewGuide = res;
+                document.getElementById('interview-actions').style.display = 'block';
+                document.getElementById('interview-results').innerHTML = `
+                    <pre>${res.markdown}</pre>
+                `;
+            } catch (e) { alert(e); }
+        }
+
+        function downloadFile(filename, text) {
+            var element = document.createElement('a');
+            element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+            element.setAttribute('download', filename);
+            element.style.display = 'none';
+            document.body.appendChild(element);
+            element.click();
+            document.body.removeChild(element);
+        }
+
+        function exportInterviewJson() {
+            if (!lastInterviewGuide) return;
+            downloadFile(`job_${currentJobId}_interview_guide.json`, JSON.stringify(lastInterviewGuide.guide, null, 2));
+        }
+
+        function exportInterviewMd() {
+            if (!lastInterviewGuide) return;
+            downloadFile(`job_${currentJobId}_interview_guide.md`, lastInterviewGuide.markdown);
         }
 
         async function exportJob() {

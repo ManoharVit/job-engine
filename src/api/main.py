@@ -12,6 +12,8 @@ from src.tracking.crud import create_job, get_job
 from src.ingestors import CSVIngestor
 from src.document_generation import DocumentGenerator, MissingEvidenceError, DuplicateDraftError
 from src.approval import ApprovalStateMachine, JobState, InvalidStateTransitionError
+from src.eligibility import evaluate_application_eligibility, to_eligibility_job
+from src.interview import generate_interview_guide
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -141,4 +143,32 @@ def export_application(job_id: int, db: Session = Depends(get_db)):
         "job": JobRead.model_validate(job).model_dump(),
         "draft": draft.content if draft else None,
         "profile_summary": "Export summary"
+    }
+
+@app.post("/api/jobs/{job_id}/interview-guide")
+def get_interview_guide(job_id: int, request: ReviewRequest, db: Session = Depends(get_db)):
+    job = get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job_read = JobRead.model_validate(job)
+    eligibility_job = to_eligibility_job(job_read)
+    
+    eligibility_decision = evaluate_application_eligibility(
+        job=eligibility_job,
+        profile=request.profile,
+        evidence=request.evidence,
+        verified_job=True
+    )
+
+    guide = generate_interview_guide(
+        job=job_read,
+        profile=request.profile,
+        evidence=request.evidence,
+        eligibility=eligibility_decision
+    )
+    
+    return {
+        "guide": guide.model_dump(),
+        "markdown": guide.to_markdown()
     }

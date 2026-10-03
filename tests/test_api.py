@@ -375,3 +375,51 @@ def test_csv_import_db_error(client, test_db, monkeypatch):
     assert response.status_code == 200
     assert response.json()["imported"] == 0
     assert "Database error" in response.json()["rejected"][0]["error"]
+
+def test_get_interview_guide_api(client, test_db):
+    res = client.post("/api/jobs", json={
+        "source": "manual", "source_job_id": "guide_api_1", "canonical_url": "http://example.com/guide_api_1",
+        "title": "Software Engineer", "company": "Test Co", "description": "Good job", "experience_level": "mid-level", "required_skills": ["Python", "AWS"]
+    })
+    assert res.status_code == 200
+    job_id = res.json()["id"]
+
+    payload = {
+        "profile": {
+            "target_roles": ["Software Engineer"],
+            "must_have_skills": ["Python"],
+            "nice_to_have_skills": [],
+            "excluded_skills": []
+        },
+        "evidence": [
+            {
+                "skill": "Python",
+                "source_type": "repo",
+                "reference": "github.com/test",
+                "verified": True
+            }
+        ]
+    }
+
+    response = client.post(f"/api/jobs/{job_id}/interview-guide", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    
+    assert "guide" in data
+    assert "markdown" in data
+    
+    guide = data["guide"]
+    assert guide["eligibility"]["decision"] == "SKIP_NOT_HUMAN_APPROVED"
+    assert guide["eligibility"]["reason"] == "not approved"
+    
+    assert any(s["skill"] == "Python" for s in guide["matched_skills"])
+    assert any(s == "AWS" for s in guide["missing_requirements"])
+    assert "## Interview Preparation Guide" in data["markdown"]
+
+def test_get_interview_guide_api_not_found(client):
+    payload = {
+        "profile": {},
+        "evidence": []
+    }
+    response = client.post("/api/jobs/999/interview-guide", json=payload)
+    assert response.status_code == 404
