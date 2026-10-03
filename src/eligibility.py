@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional, List, Dict, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from src.models.job import JobRead
 from src.models.profile import CandidateProfile, Evidence
 
@@ -32,30 +33,59 @@ class SubmissionEvidence(BaseModel):
     verified: bool
     verified_by: Optional[str] = None
     verified_at: Optional[datetime] = None
-    review_audit_id: Optional[int] = None
+    review_audit_id: Optional[int] = Field(None, gt=0)
+
+    @model_validator(mode='after')
+    def check_timestamps_and_timezone(self) -> 'SubmissionEvidence':
+        if self.observed_at.tzinfo is None:
+            raise ValueError("observed_at must be timezone-aware")
+            
+        if self.verified_at:
+            if self.verified_at.tzinfo is None:
+                raise ValueError("verified_at must be timezone-aware")
+            if self.verified_at < self.observed_at:
+                raise ValueError("verified_at cannot precede observed_at")
+                
+        return self
 
 
 class EligibilityJob(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     title: str
     description: Optional[str] = None
-    required_skills: List[str] = []
+    required_skills: List[str] = Field(default_factory=list)
     experience_level: Optional[str] = None
     application_status: str
 
 
+def to_eligibility_job(job: JobRead) -> EligibilityJob:
+    """Safely converts a persistence-layer DTO to a local decision-engine input."""
+    return EligibilityJob(
+        title=job.title,
+        description=job.description,
+        required_skills=job.required_skills or [],
+        experience_level=job.experience_level,
+        application_status=job.application_status
+    )
+
+
+SKILL_ALIASES = {
+    "nodejs": "node.js",
+    "reactjs": "react",
+    "postgres": "postgresql",
+    "c sharp": "c#",
+    "amazon web services": "aws",
+    "c++": "c++"
+}
+
 def normalize_skill(skill: str) -> str:
     s = skill.lower().strip()
-    aliases = {
-        "nodejs": "node.js",
-        "postgres": "postgresql",
-        "c++": "c++",
-        "reactjs": "react"
-    }
-    return aliases.get(s, s)
+    return SKILL_ALIASES.get(s, s)
 
-def evaluate_seniority(job_exp: Optional[str], prof_exp: Optional[str]) -> Literal["PASS", "FAIL", "UNKNOWN"]:
+def evaluate_seniority(job_exp: Optional[str], prof_exp: Optional[str]) -> Literal["PASS", "FAIL", "REVIEW_REQUIRED"]:
     if not job_exp or not prof_exp:
-        return "UNKNOWN"
+        return "REVIEW_REQUIRED"
         
     j = job_exp.lower().strip()
     p = prof_exp.lower().strip()
@@ -63,7 +93,9 @@ def evaluate_seniority(job_exp: Optional[str], prof_exp: Optional[str]) -> Liter
     # Controlled vocabulary mapping
     seniority_levels = {
         "entry-level": 1,
+        "entry level": 1,
         "junior": 1,
+        "0-2 years": 1,
         "1-3 years": 1,
         "mid-level": 2,
         "3-5 years": 2,
@@ -76,10 +108,14 @@ def evaluate_seniority(job_exp: Optional[str], prof_exp: Optional[str]) -> Liter
     prof_level = seniority_levels.get(p)
     
     if job_level is None or prof_level is None:
-        return "UNKNOWN"
+        return "REVIEW_REQUIRED"
         
     if job_level > prof_level:
         return "FAIL"
+        
+    level_diff = prof_level - job_level
+    if level_diff >= 2:
+        return "REVIEW_REQUIRED" # Overqualified
         
     return "PASS"
 
@@ -106,11 +142,11 @@ def evaluate_application_eligibility(
     if job.application_status != "APPROVED":
         return {"decision": "SKIP_NOT_HUMAN_APPROVED", "reason": "not approved", "application_action": "not_performed"}
         
-    # Seniority mismatch
+    # Seniority evaluation
     seniority_decision = evaluate_seniority(job.experience_level, profile.experience_range)
     if seniority_decision == "FAIL":
         return {"decision": "SKIP_SENIORITY_MISMATCH", "reason": "seniority_mismatch", "application_action": "not_performed"}
-    elif seniority_decision == "UNKNOWN":
+    elif seniority_decision == "REVIEW_REQUIRED":
         return {"decision": "REVIEW_REQUIRED", "reason": "unknown_seniority", "application_action": "not_performed"}
             
     # Missing required skills check against profile and verified evidence

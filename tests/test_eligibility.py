@@ -1,12 +1,15 @@
 import pytest
 import datetime
 from pydantic import ValidationError
+from src.models.job import JobRead
 from src.models.profile import CandidateProfile, Evidence
 from src.eligibility import (
     evaluate_application_eligibility,
     assess_submission_evidence,
     SubmissionEvidence,
-    EligibilityJob
+    EligibilityJob,
+    to_eligibility_job,
+    normalize_skill
 )
 
 def get_base_job():
@@ -41,14 +44,12 @@ def test_missing_profile():
     assert result["application_action"] == "not_performed"
 
 def test_missing_job_details():
-    job = get_base_job()
-    job.description = "   "
+    job = get_base_job().model_copy(update={"description": "   "})
     profile = get_base_profile()
     result = evaluate_application_eligibility(job, profile, [], True)
     assert result["decision"] == "SKIP_MISSING_JOB_DETAILS"
 
-    job = get_base_job()
-    job.title = ""
+    job = get_base_job().model_copy(update={"title": ""})
     result = evaluate_application_eligibility(job, profile, [], True)
     assert result["decision"] == "SKIP_MISSING_JOB_DETAILS"
 
@@ -59,25 +60,32 @@ def test_unverified_job():
     assert result["decision"] == "SKIP_UNVERIFIED_JOB"
 
 def test_not_human_approved():
-    job = get_base_job()
-    job.application_status = "NEW"
+    job = get_base_job().model_copy(update={"application_status": "NEW"})
     profile = get_base_profile()
     result = evaluate_application_eligibility(job, profile, [], True)
     assert result["decision"] == "SKIP_NOT_HUMAN_APPROVED"
 
 def test_seniority_mismatch():
-    job = get_base_job()
-    job.experience_level = "Principal"
+    # FAIL case (job level > profile level)
+    job = get_base_job().model_copy(update={"experience_level": "Principal"})
     profile = get_base_profile()
     profile.experience_range = "Junior"
     result = evaluate_application_eligibility(job, profile, [], True)
     assert result["decision"] == "SKIP_SENIORITY_MISMATCH"
 
 def test_unknown_seniority():
-    job = get_base_job()
-    job.experience_level = "Some weird string"
+    job = get_base_job().model_copy(update={"experience_level": "Some weird string"})
     profile = get_base_profile()
     profile.experience_range = "Junior"
+    result = evaluate_application_eligibility(job, profile, [], True)
+    assert result["decision"] == "REVIEW_REQUIRED"
+    assert result["reason"] == "unknown_seniority"
+    
+def test_overqualified_seniority():
+    # REVIEW_REQUIRED case (level_diff >= 2)
+    job = get_base_job().model_copy(update={"experience_level": "Junior"})
+    profile = get_base_profile()
+    profile.experience_range = "Principal"
     result = evaluate_application_eligibility(job, profile, [], True)
     assert result["decision"] == "REVIEW_REQUIRED"
     assert result["reason"] == "unknown_seniority"
@@ -91,8 +99,7 @@ def test_missing_required_skills():
     assert "SQL" in result["missing_skills"]
 
 def test_case_insensitive_and_aliases():
-    job = get_base_job()
-    job.required_skills = ["Postgres", "python"]
+    job = get_base_job().model_copy(update={"required_skills": ["Postgres", "python"]})
     profile = get_base_profile()
     profile.must_have_skills = ["PostgreSQL", "PYTHON"]
     
@@ -103,9 +110,20 @@ def test_case_insensitive_and_aliases():
     result = evaluate_application_eligibility(job, profile, evidence, True)
     assert result["decision"] == "ELIGIBLE_FOR_LOCAL_DRAFT"
 
+def test_sql_and_postgresql_not_equated():
+    assert normalize_skill("SQL") != normalize_skill("PostgreSQL")
+    
+    job = get_base_job().model_copy(update={"required_skills": ["PostgreSQL"]})
+    profile = get_base_profile()
+    profile.must_have_skills = ["SQL"]
+    evidence = [
+        Evidence(skill="SQL", source_type="repo", reference="github.com", verified=True)
+    ]
+    result = evaluate_application_eligibility(job, profile, evidence, True)
+    assert result["decision"] == "SKIP_MISSING_REQUIRED_SKILLS"
+
 def test_deterministic_missing_skills():
-    job = get_base_job()
-    job.required_skills = ["Zebra", "Apple", "Banana"]
+    job = get_base_job().model_copy(update={"required_skills": ["Zebra", "Apple", "Banana"]})
     profile = get_base_profile()
     profile.must_have_skills = []
     
@@ -113,8 +131,7 @@ def test_deterministic_missing_skills():
     assert result["missing_skills"] == ["Apple", "Banana", "Zebra"]
 
 def test_empty_required_skills():
-    job = get_base_job()
-    job.required_skills = []
+    job = get_base_job().model_copy(update={"required_skills": []})
     profile = get_base_profile()
     
     result = evaluate_application_eligibility(job, profile, [], True)
@@ -127,6 +144,34 @@ def test_eligible():
     evidence = get_base_evidence()
     result = evaluate_application_eligibility(job, profile, evidence, True)
     assert result["decision"] == "ELIGIBLE_FOR_LOCAL_DRAFT"
+    
+def test_to_eligibility_job():
+    j = JobRead(
+        id=1,
+        source="test",
+        source_job_id="123",
+        canonical_url="http://test.com",
+        title="Software Engineer",
+        company="Tech Corp",
+        description="Write code.",
+        discovered_at=datetime.datetime.now(datetime.UTC),
+        application_status="NEW",
+        required_skills=["Python", "SQL"],
+        experience_level="Junior"
+    )
+    ej = to_eligibility_job(j)
+    assert ej.title == "Software Engineer"
+    assert ej.application_status == "NEW"
+
+def test_eligibility_job_frozen():
+    job = get_base_job()
+    with pytest.raises(ValidationError):
+        job.title = "Mutable"
+
+def test_required_skills_independent_defaults():
+    job1 = EligibilityJob(title="J1", application_status="NEW")
+    job2 = EligibilityJob(title="J2", application_status="NEW")
+    assert job1.required_skills is not job2.required_skills
 
 def test_assess_submission_evidence():
     # Not attempted
@@ -139,6 +184,51 @@ def test_assess_submission_evidence():
             observed_at=datetime.datetime.now(datetime.UTC),
             source_reference_hash="abc",
             verified=True
+        )
+
+    # Missing timezone
+    with pytest.raises(ValueError, match="observed_at must be timezone-aware"):
+        SubmissionEvidence(
+            evidence_type="platform_confirmation_text",
+            observed_at=datetime.datetime.now(),
+            source_reference_hash="abc",
+            verified=False
+        )
+
+    # Missing timezone on verified_at
+    with pytest.raises(ValueError, match="verified_at must be timezone-aware"):
+        SubmissionEvidence(
+            evidence_type="platform_confirmation_text",
+            observed_at=datetime.datetime.now(datetime.UTC),
+            source_reference_hash="abc",
+            verified=True,
+            verified_by="Alice",
+            verified_at=datetime.datetime.now(),
+            review_audit_id=123
+        )
+        
+    # Verified at < observed at
+    with pytest.raises(ValueError, match="cannot precede observed_at"):
+        SubmissionEvidence(
+            evidence_type="platform_confirmation_text",
+            observed_at=datetime.datetime.now(datetime.UTC),
+            source_reference_hash="abc",
+            verified=True,
+            verified_by="Alice",
+            verified_at=datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=1),
+            review_audit_id=123
+        )
+
+    # Non-positive review_audit_id
+    with pytest.raises(ValidationError):
+        SubmissionEvidence(
+            evidence_type="platform_confirmation_text",
+            observed_at=datetime.datetime.now(datetime.UTC),
+            source_reference_hash="abc",
+            verified=True,
+            verified_by="Alice",
+            verified_at=datetime.datetime.now(datetime.UTC),
+            review_audit_id=-5
         )
 
     # Unverified
@@ -176,9 +266,9 @@ def test_boundary_no_forbidden_imports():
             if node.module:
                 assert not node.module.startswith("src.api")
                 assert not node.module.startswith("src.tracking")
+
 def test_missing_seniority():
-    job = get_base_job()
-    job.experience_level = None
+    job = get_base_job().model_copy(update={"experience_level": None})
     profile = get_base_profile()
     result = evaluate_application_eligibility(job, profile, [], True)
     assert result["decision"] == "REVIEW_REQUIRED"
