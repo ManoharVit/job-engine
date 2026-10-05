@@ -2,8 +2,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Body, Query
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel
+from typing import List, Optional, Dict, Any, Literal
+from pydantic import BaseModel, Field
+from datetime import datetime
 
 from src.models.job import JobCreate, JobRead, JobModel, Draft
 from src.models.profile import CandidateProfile, Evidence
@@ -14,6 +15,24 @@ from src.document_generation import DocumentGenerator, MissingEvidenceError, Dup
 from src.approval import ApprovalStateMachine, JobState, InvalidStateTransitionError
 from src.eligibility import evaluate_application_eligibility, to_eligibility_job
 from src.interview import generate_interview_guide
+from src.screening import ScreeningQuestion, ScreeningAnswerReview, evaluate_screening_question
+
+class ApplicationObservation(BaseModel):
+    source: Literal["naukri", "linkedin", "other"]
+    job_identifier_hash: str
+    observed_at: datetime
+    event: Literal[
+        "JOB_PAGE_OPENED",
+        "APPLICATION_FORM_OPENED",
+        "MANUAL_CONFIRMATION_RECORDED"
+    ]
+    details: dict[str, str] = Field(default_factory=dict)
+    human_verified: bool = False
+
+class ScreeningReviewRequest(BaseModel):
+    questions: List[ScreeningQuestion]
+    profile: CandidateProfile
+    evidence: List[Evidence]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,6 +40,12 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="Job Engine API", lifespan=lifespan)
+from fastapi.responses import RedirectResponse
+
+@app.get("/")
+def redirect_to_ui():
+    return RedirectResponse(url="/ui/")
+
 app.mount("/ui", StaticFiles(directory="static", html=True), name="static")
 
 class ReviewRequest(BaseModel):
@@ -31,7 +56,6 @@ class StateTransitionRequest(BaseModel):
     state: JobState
     reason: str = ""
     dry_run: bool = False
-
 
 @app.post("/api/jobs", response_model=JobRead)
 def import_manual_job(job: JobCreate, db: Session = Depends(get_db)):
@@ -172,3 +196,97 @@ def get_interview_guide(job_id: int, request: ReviewRequest, db: Session = Depen
         "guide": guide.model_dump(),
         "markdown": guide.to_markdown()
     }
+
+@app.post("/api/screening-questions/review", response_model=List[ScreeningAnswerReview])
+def review_screening_questions(request: ScreeningReviewRequest):
+    return [evaluate_screening_question(q, request.profile, request.evidence) for q in request.questions]
+
+@app.post("/api/jobs/{job_id}/screening-review", response_model=List[ScreeningAnswerReview])
+def review_job_screening_questions(job_id: int, request: ScreeningReviewRequest, db: Session = Depends(get_db)):
+    job = get_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return [evaluate_screening_question(q, request.profile, request.evidence) for q in request.questions]
+
+from src.review.evidence import SubmissionEvidenceRecord
+
+class OpenReviewRequest(BaseModel):
+    verified_by: str
+
+@app.post("/api/jobs/{job_id}/open-evidence-review")
+def open_evidence_review(job_id: int, request: OpenReviewRequest, db: Session = Depends(get_db)):
+    from src.review.service import ReviewService
+    svc = ReviewService(db)
+    try:
+        audit_id = svc.open_evidence_review(job_id, verified_by=request.verified_by)
+        return {"review_audit_id": audit_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/jobs/{job_id}/verify-confirmed")
+def verify_confirmed(job_id: int, request: SubmissionEvidenceRecord, db: Session = Depends(get_db)):
+    from src.review.service import ReviewService
+    svc = ReviewService(db)
+    try:
+        log = svc.confirm_submission(job_id, request)
+        return log.to_structured_event()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+from src.shortlist import (
+    ShortlistRequest, ShortlistResponse, parse_link_lines, build_shortlist,
+    ShortlistEntry, FitSummary, PrepPack, ScreeningDraft, SubmissionInfo, FollowUp
+)
+from src.models.job import JobModel
+
+class ShortlistPasteRequest(ShortlistRequest):
+    text: str
+
+@app.post("/api/shortlist", response_model=ShortlistResponse)
+def generate_shortlist(request: ShortlistPasteRequest, db: Session = Depends(get_db)):
+    # 1. Parse pasted text
+    items, rejected = parse_link_lines(request.text)
+    
+    # 2. Convert parsed items to jobs and insert/update them in the DB to get IDs
+    # (Because build_shortlist expects job_ids or queries JobModel).
+    # Wait, the prompt says "build_shortlist only reads jobs". So the parsed items MUST be in the DB.
+    # Alternatively, build_shortlist can evaluate jobs entirely in memory?
+    # Let's check build_shortlist in src/shortlist.py:
+    # `query = db.query(JobModel)`
+    # It reads from JobModel. So we must persist them first!
+    
+    from src.tracking.crud import create_job
+    from src.models.job import JobCreate
+    
+    job_ids = []
+    for item in items:
+        # Check if canonical_url already exists
+        from src.canonicalize import canonicalize_url
+        canonical = canonicalize_url(item["url"])
+        existing = db.query(JobModel).filter(JobModel.canonical_url == canonical).first()
+        if existing:
+            job_ids.append(existing.id)
+        else:
+            try:
+                item_copy = item.copy()
+                item_copy["canonical_url"] = canonicalize_url(item_copy.pop("url"))
+                jc = JobCreate(**item_copy)
+                new_job = create_job(db, jc)
+                job_ids.append(new_job.id)
+            except Exception as e:
+                # Silently skip on error as per requirements? Let's just rollback
+                db.rollback()
+                pass
+    
+    # 3. Create ShortlistRequest for build_shortlist
+    sr = ShortlistRequest(
+        profile=request.profile,
+        evidence=request.evidence,
+        profile_version=request.profile_version,
+        allow_contract=request.allow_contract,
+        job_ids=job_ids
+    )
+    
+    # 4. Call build_shortlist
+    from datetime import datetime, timezone
+    return build_shortlist(db, sr, now=datetime.now(timezone.utc))

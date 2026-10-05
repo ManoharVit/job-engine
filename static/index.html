@@ -1,233 +1,509 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Job Engine UI</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Engine - Local Review</title>
     <style>
-        body { font-family: sans-serif; margin: 20px; }
-        h1 { color: #333; }
-        .job-card { border: 1px solid #ccc; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
-        .job-card h3 { margin-top: 0; }
-        .actions { margin-top: 10px; }
-        button { padding: 5px 10px; margin-right: 5px; cursor: pointer; }
-        #details-pane { display: none; margin-top: 20px; padding: 15px; border: 1px solid #aaa; background: #f9f9f9; }
-        pre { background: #eee; padding: 10px; white-space: pre-wrap; }
-        .grid { display: flex; gap: 20px; }
-        .list-col { flex: 1; max-width: 400px; }
-        .details-col { flex: 2; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f4f4f5; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .job-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        .job-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+        .job-title { margin: 0; font-size: 1.25rem; color: #111827; }
+        .job-company { color: #4b5563; font-weight: 500; }
+        .job-meta { display: flex; gap: 15px; font-size: 0.875rem; color: #6b7280; margin-bottom: 15px; }
+        .badge { background: #fee2e2; color: #991b1b; padding: 4px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+        .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+        button { padding: 8px 16px; border: none; border-radius: 6px; font-weight: 500; cursor: pointer; transition: opacity 0.2s; }
+        button:hover { opacity: 0.9; }
+        .btn-approve { background: #10b981; color: white; }
+        .btn-skip { background: #ef4444; color: white; }
+        .btn-draft { background: #3b82f6; color: white; }
+        .btn-confirm { background: #f59e0b; color: white; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); }
+        .modal-content { background: white; width: 500px; margin: 50px auto; padding: 20px; border-radius: 8px; }
+        .modal-content h3 { margin-top: 0; }
+        .warning { background: #fff3cd; color: #856404; padding: 10px; border-radius: 4px; margin-bottom: 15px; font-size: 0.9rem; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9rem; }
+        .form-group select, .form-group input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
     </style>
 </head>
 <body>
-    <h1>Job Engine Web Interface</h1>
-    <div class="actions" style="margin-bottom: 20px;">
-        <button onclick="loadJobs()">Refresh Jobs</button>
-        <button onclick="addSyntheticJob()">+ Add Synthetic Job</button>
-    </div>
+    <div class="container">
 
-    <div class="grid">
-        <div class="list-col" id="job-list">
-            <p>Loading jobs...</p>
+        <div style="margin-bottom: 30px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            <h2>Daily Shortlist Workflow</h2>
+            <p>Paste job links (format: URL | Title | Company | Location | Experience | Skills) to generate a shortlist and prep-packs.</p>
+            <textarea id="shortlistInput" rows="5" style="width: 100%; margin-bottom: 10px; padding: 10px;" placeholder="https://example.com/job/1 | Backend Dev | TechCorp"></textarea>
+            <button class="btn-draft" onclick="generateShortlist()">Generate Shortlist</button>
+            <div id="shortlistResults" style="margin-top: 20px;"></div>
         </div>
 
-        <div class="details-col" id="details-pane">
-            <h2 id="det-title"></h2>
-            <p><strong>Company:</strong> <span id="det-company"></span> | <strong>Status:</strong> <span id="det-status"></span></p>
-            
-            <div class="actions" id="state-actions"></div>
-            
-            <h3>Review Results</h3>
-            <button onclick="reviewJob()">Run Review / Calculate Fit</button>
-            <div id="review-results"></div>
+        <header>
+            <h1>Job Engine Review Queue</h1>
+            <div id="stats">Loading...</div>
+        </header>
 
-            <h3>Interview Preparation</h3>
-            <button onclick="prepInterview()">Generate Interview Guide</button>
-            <div id="interview-actions" style="display:none; margin-top:10px;">
-                <button onclick="exportInterviewJson()">Export JSON</button>
-                <button onclick="exportInterviewMd()">Export Markdown</button>
+        <div id="queue"></div>
+    </div>
+
+    <!-- Verify Confirmed Modal -->
+    <div id="verifyModal" class="modal">
+        <div class="modal-content">
+            <h3>Verify Confirmed Submission</h3>
+            <div class="warning">
+                <strong>WARNING:</strong> Any employer-site action is manual and strictly outside Job Engine. Do not paste passwords, cookies, screening answers, or full form contents here.
             </div>
-            <div id="interview-results"></div>
+            <form id="verifyForm">
+                <input type="hidden" id="verifyJobId">
+                <input type="hidden" id="verifyJobRefHash">
+                <div class="form-group">
+                    <label>Verified By (Your Name/ID)</label>
+                    <input type="text" id="verifyBy" required placeholder="e.g., human-reviewer-1">
+                </div>
+                <div class="form-group">
+                    <label>Evidence Type</label>
+                    <select id="evidenceType" required>
+                        <option value="platform_status_record">Platform Application-Status Record</option>
+                        <option value="confirmation_email">Confirmation Email</option>
+                        <option value="explicit_platform_text">Explicit Platform Confirmation Text</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Source Reference Hash (SHA256 of canonical URL)</label>
+                    <input type="text" id="sourceRefHash" required readonly>
+                </div>
+                <div class="form-group">
+                    <label>Observed At (UTC)</label>
+                    <input type="text" id="observedAt" required readonly>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-skip" onclick="closeVerifyModal()">Cancel</button>
+                    <button type="submit" class="btn-approve">Submit Verification</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
-            <h3>Draft Preview</h3>
-            <button onclick="draftJob()">Generate Draft (Dry Run)</button>
-            <div id="draft-results"></div>
-            
-            <h3>Export</h3>
-            <button onclick="exportJob()" id="btn-export" disabled>Export Application (Requires APPROVED status)</button>
-            <div id="export-results"></div>
+
+    <!-- Review Modal -->
+    <div id="reviewModal" class="modal" style="overflow-y: scroll;">
+        <div class="modal-content" style="width: 800px; margin: 20px auto;">
+            <h3>Review Job & Export</h3>
+            <div class="warning">
+                <strong>WARNING:</strong> Review the generated content carefully. Exporting will transition the state.
+            </div>
+
+            <div id="reviewContent">Loading...</div>
+
+            <div class="modal-actions" style="margin-top: 20px;">
+                <button type="button" class="btn-skip" onclick="closeReviewModal()">Cancel</button>
+                <button type="button" class="btn-approve" id="approveExportBtn" style="display:none;" onclick="approveAndExport()">Approve & Export</button>
+            </div>
         </div>
     </div>
 
     <script>
-        let currentJobId = null;
-
-        const syntheticJob = {
-          "source": "manual-test",
-          "source_job_id": "demo-" + Math.floor(Math.random()*10000),
-          "canonical_url": "https://example.com/jobs/demo",
-          "title": "Python Backend Engineer",
-          "company": "Example Systems",
-          "location": "Remote - India",
-          "description": "Build reliable Python APIs and data pipelines. Experience with FastAPI, PostgreSQL, SQLAlchemy, Docker, and automated testing is preferred.",
-          "required_skills": ["Python", "FastAPI", "SQL", "PostgreSQL"],
-          "preferred_skills": ["Docker", "Celery"],
-          "application_status": "NEW"
-        };
-
-        const syntheticReview = {
-          "profile": {
-            "target_roles": ["Python Backend Engineer", "Backend Developer", "Data Engineer"],
-            "must_have_skills": ["Python", "FastAPI", "SQL"],
-            "nice_to_have_skills": ["PostgreSQL", "Docker", "Celery"],
-            "excluded_skills": []
-          },
-          "evidence": [
-            { "skill": "Python", "source_type": "verified_resume", "reference": "resume-project-1", "verified": true },
-            { "skill": "FastAPI", "source_type": "verified_project", "reference": "project-api-1", "verified": true },
-            { "skill": "SQL", "source_type": "verified_project", "reference": "project-data-1", "verified": true }
-          ]
-        };
-
-        async function apiCall(path, method="GET", body=null) {
-            const opts = { method, headers: {} };
-            if (body) {
-                opts.headers['Content-Type'] = 'application/json';
-                opts.body = JSON.stringify(body);
-            }
-            const res = await fetch(`/api${path}`, opts);
-            if (!res.ok) {
-                const text = await res.text();
-                throw new Error(`API Error ${res.status}: ${text}`);
-            }
-            return res.json();
-        }
-
-        async function addSyntheticJob() {
-            try {
-                syntheticJob.source_job_id = "demo-" + Math.floor(Math.random()*100000);
-                await apiCall('/jobs', 'POST', syntheticJob);
-                loadJobs();
-            } catch (e) { alert(e); }
-        }
-
         async function loadJobs() {
             try {
-                const jobs = await apiCall('/jobs');
-                const html = jobs.map(j => `
-                    <div class="job-card" onclick="showJob(${j.id})">
-                        <h3>${j.title}</h3>
-                        <p>${j.company}</p>
-                        <p>Status: ${j.application_status}</p>
-                    </div>
-                `).join('');
-                document.getElementById('job-list').innerHTML = html || "<p>No jobs found.</p>";
-            } catch (e) { alert(e); }
-        }
+                const response = await fetch('/api/jobs');
+                const jobs = await response.json();
 
-        async function showJob(id) {
-            currentJobId = id;
-            try {
-                const job = await apiCall(`/jobs/${id}`);
-                document.getElementById('details-pane').style.display = 'block';
-                document.getElementById('det-title').innerText = job.title;
-                document.getElementById('det-company').innerText = job.company;
-                document.getElementById('det-status').innerText = job.application_status;
-                
-                document.getElementById('review-results').innerHTML = '';
-                document.getElementById('interview-results').innerHTML = '';
-                document.getElementById('interview-actions').style.display = 'none';
-                lastInterviewGuide = null;
-                document.getElementById('draft-results').innerHTML = '';
-                document.getElementById('export-results').innerHTML = '';
-                
-                renderStateActions(job.application_status);
-                document.getElementById('btn-export').disabled = (job.application_status !== 'APPROVED');
-            } catch (e) { alert(e); }
-        }
+                const reviewQueue = jobs.filter(j =>
+                    j.application_status === 'SUBMISSION_UNCONFIRMED' ||
+                    j.application_status === 'REVIEW_REQUIRED' ||
+                    j.application_status === 'NEW'
+                );
 
-        function renderStateActions(status) {
-            const c = document.getElementById('state-actions');
-            let nextState = null;
-            if (status === 'NEW') nextState = 'REVIEWED';
-            else if (status === 'REVIEWED') nextState = 'DRAFTED';
-            else if (status === 'DRAFTED') nextState = 'APPROVED';
-            
-            if (nextState) {
-                c.innerHTML = `<button onclick="transitionState('${nextState}')">Move to ${nextState}</button>`;
-            } else {
-                c.innerHTML = `<em>No standard forward transitions from ${status}</em>`;
+                document.getElementById('stats').innerHTML = `<strong>${reviewQueue.length}</strong> jobs pending review`;
+
+                const queueEl = document.getElementById('queue');
+                queueEl.innerHTML = '';
+
+                if(reviewQueue.length === 0) {
+                    queueEl.innerHTML = '<p>All caught up! No jobs pending review.</p>';
+                    return;
+                }
+
+                reviewQueue.forEach(job => {
+                    const card = document.createElement('div');
+                    card.className = 'job-card';
+                    card.innerHTML = `
+                        <div class="job-header">
+                            <div>
+                                <h2 class="job-title"><a href="${job.canonical_url}" target="_blank" style="color: inherit; text-decoration: none;">${job.title}</a></h2>
+                                <div class="job-company">${job.company}</div>
+                            </div>
+                            <span class="badge">${job.application_status}</span>
+                        </div>
+                        <div class="job-meta">
+                            <span>📍 ${job.location || 'Remote/Unspecified'}</span>
+                            <span>📅 ${new Date(job.discovered_at).toLocaleDateString()}</span>
+                        </div>
+                        <div class="actions">
+                            <button class="btn-confirm" onclick="openVerifyModal(${job.id}, '${job.canonical_url}')">Verify Confirmed</button>
+                            <button class="btn-skip" onclick="alert('Skip hook pending backend state machine update for ReviewState')">Skip / Mark False Positive</button>
+                            <button class="btn-draft" onclick="generateDraft(${job.id})">Preview Fit & Cover Letter</button>
+                        </div>
+                    `;
+                    queueEl.appendChild(card);
+                });
+            } catch (err) {
+                document.getElementById('queue').innerHTML = `<p style="color:red">Error loading jobs: ${err.message}</p>`;
             }
         }
 
-        async function transitionState(newState) {
+        async function sha256(message) {
+            const msgBuffer = new TextEncoder().encode(message);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            return 'sha256:' + hashHex;
+        }
+
+        async function openVerifyModal(jobId, canonicalUrl) {
+            document.getElementById('verifyJobId').value = jobId;
+
+            // Normalize URL for hashing
+            let normalized = canonicalUrl.toLowerCase();
+            if (normalized.includes("?")) {
+                normalized = normalized.split("?")[0];
+            }
+            if (normalized.endsWith("/")) {
+                normalized = normalized.slice(0, -1);
+            }
+            const hash = await sha256(normalized);
+
+            document.getElementById('verifyJobRefHash').value = hash;
+            document.getElementById('sourceRefHash').value = hash;
+            document.getElementById('observedAt').value = new Date().toISOString();
+
+            document.getElementById('verifyModal').style.display = 'block';
+        }
+
+        function closeVerifyModal() {
+            document.getElementById('verifyModal').style.display = 'none';
+            document.getElementById('verifyForm').reset();
+        }
+
+        document.getElementById('verifyForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const jobId = document.getElementById('verifyJobId').value;
+            const verifiedBy = document.getElementById('verifyBy').value;
+            const evidenceType = document.getElementById('evidenceType').value;
+            const sourceRefHash = document.getElementById('sourceRefHash').value;
+            const jobRefHash = document.getElementById('verifyJobRefHash').value;
+            const observedAt = document.getElementById('observedAt').value;
+            const verifiedAt = new Date().toISOString();
+
             try {
-                const req = { state: newState, reason: "Web UI Transition" };
-                const job = await apiCall(`/jobs/${currentJobId}/state`, 'POST', req);
-                showJob(currentJobId);
-                loadJobs();
-            } catch (e) { alert(e); }
-        }
+                // 1. Open Evidence Review to get audit ID
+                const openRes = await fetch(`/api/jobs/${jobId}/open-evidence-review`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ verified_by: verifiedBy })
+                });
 
-        async function reviewJob() {
+                if (!openRes.ok) throw new Error(await openRes.text());
+                const { review_audit_id } = await openRes.json();
+
+                // 2. Verify Confirmed
+                const verifyPayload = {
+                    evidence_id: crypto.randomUUID(),
+                    job_ref_hash: jobRefHash,
+                    evidence_type: evidenceType,
+                    observed_at: observedAt,
+                    source_reference_hash: sourceRefHash,
+                    verified_by: verifiedBy,
+                    verified_at: verifiedAt,
+                    review_audit_id: review_audit_id
+                };
+
+                const verifyRes = await fetch(`/api/jobs/${jobId}/verify-confirmed`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(verifyPayload)
+                });
+
+                if (!verifyRes.ok) throw new Error(await verifyRes.text());
+
+                alert("Successfully verified!");
+                closeVerifyModal();
+                
+        async function generateShortlist() {
+            const text = document.getElementById('shortlistInput').value;
+            const resEl = document.getElementById('shortlistResults');
+            resEl.innerHTML = "Generating...";
             try {
-                const res = await apiCall(`/jobs/${currentJobId}/review`, 'POST', syntheticReview);
-                document.getElementById('review-results').innerHTML = `
-                    <p><strong>Fit Score:</strong> ${res.fit_score}</p>
-                    <p><strong>Matched Skills:</strong> ${res.fit_summary.matched.join(', ')}</p>
-                    <p><strong>Missing Skills:</strong> ${res.fit_summary.missing.join(', ')}</p>
-                    <p><strong>Uncertain Skills:</strong> ${res.fit_summary.uncertain.join(', ')}</p>
-                    <pre>${JSON.stringify(res.fit_score_breakdown, null, 2)}</pre>
-                `;
-            } catch (e) { alert(e); }
+                const req = Object.assign({}, MOCK_PROFILE, { text: text, profile_version: "v1", allow_contract: false });
+                const res = await fetch('/api/shortlist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(req)
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                
+                let html = `<h3>Results (Total: ${data.counts.total})</h3>`;
+                for (const entry of data.entries) {
+                    html += `<div style="border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px;">
+                        <h4>[${entry.bucket}] ${entry.title} @ ${entry.company} (Score: ${Math.round(entry.fit_score * 100)}%)</h4>
+                        <p><strong>Decision:</strong> ${entry.rubric_decision}</p>`;
+                    
+                    if (entry.eligibility_reasons.length > 0) {
+                        html += `<ul>`;
+                        for (const r of entry.eligibility_reasons) {
+                            html += `<li>${r.label}</li>`;
+                        }
+                        html += `</ul>`;
+                    }
+
+                    if (entry.prep_pack) {
+                        html += `<details><summary>View Prep Pack</summary>`;
+                        html += `<div style="margin-top: 10px; background: #f9f9f9; padding: 10px;">`;
+                        html += `<p><em>${entry.prep_pack.notice}</em></p>`;
+                        html += `<h5>Fit Summary</h5>`;
+                        html += `<p><strong>${entry.prep_pack.fit_summary.headline}</strong></p>`;
+                        html += `<ul>`;
+                        for (const r of entry.prep_pack.fit_summary.reasons) html += `<li>${r}</li>`;
+                        html += `</ul>`;
+                        html += `<h5>Draft Cover Letter</h5>`;
+                        if (entry.prep_pack.cover_letter_draft) {
+                            html += `<pre style="white-space: pre-wrap; font-size: 0.9em;">${entry.prep_pack.cover_letter_draft}</pre>`;
+                        } else {
+                            html += `<p style="color:red">${entry.prep_pack.cover_letter_unavailable_reason}</p>`;
+                        }
+                        html += `</div></details>`;
+                    }
+                    html += `</div>`;
+                }
+                resEl.innerHTML = html;
+            } catch (err) {
+                resEl.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
+            }
         }
 
-        async function draftJob() {
+        loadJobs();
+            } catch (err) {
+                alert("Error: " + err.message);
+            }
+        });
+
+
+        const MOCK_PROFILE = {
+            "profile": {
+                "target_roles": ["Software Engineer"],
+                "must_have_skills": ["Python", "AWS", "SQL", "React"],
+                "nice_to_have_skills": [],
+                "excluded_skills": []
+            },
+            "evidence": [
+                {
+                    "skill": "Python",
+                    "source_type": "repo",
+                    "reference": "github.com/test",
+                    "verified": true
+                }
+            ]
+        };
+
+        let currentReviewJobId = null;
+
+        async function generateDraft(id) {
+            currentReviewJobId = id;
+            document.getElementById('reviewModal').style.display = 'block';
+            const rc = document.getElementById('reviewContent');
+            const btn = document.getElementById('approveExportBtn');
+            rc.innerHTML = 'Loading review data...';
+            btn.style.display = 'none';
+
             try {
-                const res = await apiCall(`/jobs/${currentJobId}/draft?dry_run=true`, 'POST', syntheticReview);
-                document.getElementById('draft-results').innerHTML = `
-                    <pre>${res.draft}</pre>
-                `;
-            } catch (e) { alert(e); }
+                // Fetch Interview Guide
+                const guideRes = await fetch(`/api/jobs/${id}/interview-guide`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(MOCK_PROFILE)
+                });
+
+                // Fetch Draft
+                const draftRes = await fetch(`/api/jobs/${id}/draft`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(MOCK_PROFILE)
+                });
+
+                if (!guideRes.ok || !draftRes.ok) {
+                    throw new Error("Failed to fetch review data");
+                }
+
+                const guideData = await guideRes.json();
+                const draftData = await draftRes.json();
+
+                const guide = guideData.guide;
+
+                let html = `<h4>Eligibility & Seniority</h4>`;
+                html += `<p>Decision: ${guide.eligibility.decision}</p>`;
+                html += `<p>Reason: ${guide.eligibility.reason || 'N/A'}</p>`;
+
+                html += `<h4>Matched Evidence</h4><ul>`;
+                for (let s of guide.matched_skills) {
+                    html += `<li>${s.skill} (Ref: ${s.evidence_reference})</li>`;
+                }
+                html += `</ul>`;
+
+                html += `<h4>Missing Requirements</h4><ul>`;
+                for (let req of guide.missing_requirements) {
+                    html += `<li>${req}</li>`;
+                }
+                html += `</ul>`;
+
+                html += `<h4>Interview Guide (Markdown)</h4>`;
+                html += `<pre style="background:#eee; padding:10px;">${guideData.markdown}</pre>`;
+
+                html += `<h4>Draft Preview</h4>`;
+                html += `<pre style="background:#eee; padding:10px;">${draftData.draft}</pre>`;
+
+                rc.innerHTML = html;
+                btn.style.display = 'inline-block';
+            } catch (e) {
+                rc.innerHTML = `<p style="color:red">Error: ${e.message}</p>`;
+            }
         }
 
-        let lastInterviewGuide = null;
+        function closeReviewModal() {
+            document.getElementById('reviewModal').style.display = 'none';
+        }
 
-        async function prepInterview() {
+        async function approveAndExport() {
             try {
-                const res = await apiCall(`/jobs/${currentJobId}/interview-guide`, 'POST', syntheticReview);
-                lastInterviewGuide = res;
-                document.getElementById('interview-actions').style.display = 'block';
-                document.getElementById('interview-results').innerHTML = `
-                    <pre>${res.markdown}</pre>
-                `;
-            } catch (e) { alert(e); }
-        }
+                // Approve
+                const appRes = await fetch(`/api/jobs/${currentReviewJobId}/state`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({state: "APPROVED", reason: "Human Approved"})
+                });
+                if (!appRes.ok) throw new Error("Approval failed");
 
-        function downloadFile(filename, text) {
-            var element = document.createElement('a');
-            element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
-            element.setAttribute('download', filename);
-            element.style.display = 'none';
-            document.body.appendChild(element);
-            element.click();
-            document.body.removeChild(element);
-        }
-
-        function exportInterviewJson() {
-            if (!lastInterviewGuide) return;
-            downloadFile(`job_${currentJobId}_interview_guide.json`, JSON.stringify(lastInterviewGuide.guide, null, 2));
-        }
-
-        function exportInterviewMd() {
-            if (!lastInterviewGuide) return;
-            downloadFile(`job_${currentJobId}_interview_guide.md`, lastInterviewGuide.markdown);
-        }
-
-        async function exportJob() {
+                // Note: According to API, it's just transitioning state.
+                // The prompt says "Allow local export only after human approval."
+                alert("Approved successfully! You can now trigger export.");
+                closeReviewModal();
+                
+        async function generateShortlist() {
+            const text = document.getElementById('shortlistInput').value;
+            const resEl = document.getElementById('shortlistResults');
+            resEl.innerHTML = "Generating...";
             try {
-                const res = await apiCall(`/jobs/${currentJobId}/export`);
-                document.getElementById('export-results').innerHTML = `
-                    <pre>${JSON.stringify(res, null, 2)}</pre>
-                `;
-            } catch (e) { alert(e); }
+                const req = Object.assign({}, MOCK_PROFILE, { text: text, profile_version: "v1", allow_contract: false });
+                const res = await fetch('/api/shortlist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(req)
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                
+                let html = `<h3>Results (Total: ${data.counts.total})</h3>`;
+                for (const entry of data.entries) {
+                    html += `<div style="border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px;">
+                        <h4>[${entry.bucket}] ${entry.title} @ ${entry.company} (Score: ${Math.round(entry.fit_score * 100)}%)</h4>
+                        <p><strong>Decision:</strong> ${entry.rubric_decision}</p>`;
+                    
+                    if (entry.eligibility_reasons.length > 0) {
+                        html += `<ul>`;
+                        for (const r of entry.eligibility_reasons) {
+                            html += `<li>${r.label}</li>`;
+                        }
+                        html += `</ul>`;
+                    }
+
+                    if (entry.prep_pack) {
+                        html += `<details><summary>View Prep Pack</summary>`;
+                        html += `<div style="margin-top: 10px; background: #f9f9f9; padding: 10px;">`;
+                        html += `<p><em>${entry.prep_pack.notice}</em></p>`;
+                        html += `<h5>Fit Summary</h5>`;
+                        html += `<p><strong>${entry.prep_pack.fit_summary.headline}</strong></p>`;
+                        html += `<ul>`;
+                        for (const r of entry.prep_pack.fit_summary.reasons) html += `<li>${r}</li>`;
+                        html += `</ul>`;
+                        html += `<h5>Draft Cover Letter</h5>`;
+                        if (entry.prep_pack.cover_letter_draft) {
+                            html += `<pre style="white-space: pre-wrap; font-size: 0.9em;">${entry.prep_pack.cover_letter_draft}</pre>`;
+                        } else {
+                            html += `<p style="color:red">${entry.prep_pack.cover_letter_unavailable_reason}</p>`;
+                        }
+                        html += `</div></details>`;
+                    }
+                    html += `</div>`;
+                }
+                resEl.innerHTML = html;
+            } catch (err) {
+                resEl.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
+            }
+        }
+
+        loadJobs();
+            } catch (e) {
+                alert(e.message);
+            }
+        }
+
+
+        
+        async function generateShortlist() {
+            const text = document.getElementById('shortlistInput').value;
+            const resEl = document.getElementById('shortlistResults');
+            resEl.innerHTML = "Generating...";
+            try {
+                const req = Object.assign({}, MOCK_PROFILE, { text: text, profile_version: "v1", allow_contract: false });
+                const res = await fetch('/api/shortlist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(req)
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                
+                let html = `<h3>Results (Total: ${data.counts.total})</h3>`;
+                for (const entry of data.entries) {
+                    html += `<div style="border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; border-radius: 5px;">
+                        <h4>[${entry.bucket}] ${entry.title} @ ${entry.company} (Score: ${Math.round(entry.fit_score * 100)}%)</h4>
+                        <p><strong>Decision:</strong> ${entry.rubric_decision}</p>`;
+                    
+                    if (entry.eligibility_reasons.length > 0) {
+                        html += `<ul>`;
+                        for (const r of entry.eligibility_reasons) {
+                            html += `<li>${r.label}</li>`;
+                        }
+                        html += `</ul>`;
+                    }
+
+                    if (entry.prep_pack) {
+                        html += `<details><summary>View Prep Pack</summary>`;
+                        html += `<div style="margin-top: 10px; background: #f9f9f9; padding: 10px;">`;
+                        html += `<p><em>${entry.prep_pack.notice}</em></p>`;
+                        html += `<h5>Fit Summary</h5>`;
+                        html += `<p><strong>${entry.prep_pack.fit_summary.headline}</strong></p>`;
+                        html += `<ul>`;
+                        for (const r of entry.prep_pack.fit_summary.reasons) html += `<li>${r}</li>`;
+                        html += `</ul>`;
+                        html += `<h5>Draft Cover Letter</h5>`;
+                        if (entry.prep_pack.cover_letter_draft) {
+                            html += `<pre style="white-space: pre-wrap; font-size: 0.9em;">${entry.prep_pack.cover_letter_draft}</pre>`;
+                        } else {
+                            html += `<p style="color:red">${entry.prep_pack.cover_letter_unavailable_reason}</p>`;
+                        }
+                        html += `</div></details>`;
+                    }
+                    html += `</div>`;
+                }
+                resEl.innerHTML = html;
+            } catch (err) {
+                resEl.innerHTML = `<p style="color:red">Error: ${err.message}</p>`;
+            }
         }
 
         loadJobs();
