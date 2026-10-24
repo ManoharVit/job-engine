@@ -6,6 +6,8 @@ class Evidence(BaseModel):
     source_type: str # e.g. "resume", "project", "repo"
     reference: str # URL or pointer to the evidence
     verified: bool = False
+    structured_duration: Optional[int] = None
+    reviewer: Optional[str] = None
 
 class CandidateProfile(BaseModel):
     target_roles: List[str] = Field(default_factory=list)

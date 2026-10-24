@@ -6,3 +6,9 @@ __pycache__/
 .coverage
 .DS_Store
 *.egg-info/
+scratch*.py
+patch_*.py
+test_output.txt
+output/
+validate_all.py
+

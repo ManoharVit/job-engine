@@ -6,6 +6,10 @@ from sqlalchemy.orm import sessionmaker
 from src.models.base import Base
 from src.review.models import ReviewRecord
 from src.models.audit import AuditLog
+from src.review.models import ReviewRecord
+from src.models.audit import AuditLog
+from src.review.models import ReviewRecord
+from src.models.audit import AuditLog
 
 from src.api.main import app, get_db
 from src.models.profile import CandidateProfile, Evidence
